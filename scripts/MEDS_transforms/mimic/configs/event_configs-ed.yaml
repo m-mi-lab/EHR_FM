@@ -1,0 +1,340 @@
+subject_id_col: subject_id
+ed/edstays:
+  ed_registration:
+    code: ED_REGISTRATION
+    time: col(intime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    text_value: arrival_transport
+    hadm_id: hadm_id
+    stay_id: stay_id
+  ed_out:
+    code: ED_OUT
+    time: col(outtime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    text_value: disposition
+    hadm_id: hadm_id
+    stay_id: stay_id
+
+ed/triage:
+  acuity:
+    code: ACUITY
+    numeric_value: acuity
+    time: col(intime)
+    time_format:
+      - "%Y-%m-%d %H:%M:%S"
+    stay_id: stay_id
+
+ed/diagnosis:
+  diagnosis:
+    code:
+      - DIAGNOSIS
+      - ICD
+      - col(icd_version)
+      - col(icd_code)
+    stay_id: stay_id
+    time: col(outtime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+
+hosp/admissions:
+  admission:
+    code:
+      - HOSPITAL_ADMISSION
+      - col(admission_type)
+      - col(admission_location)
+    time: col(admittime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    insurance: insurance
+    language: language
+    marital_status: marital_status
+    race: race
+    hadm_id: hadm_id
+  discharge:
+    code:
+      - HOSPITAL_DISCHARGE
+      - col(discharge_location)
+    time: col(dischtime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    hadm_id: hadm_id
+  # We omit the death event here as it is joined to the data in the subjects table in the pre-MEDS step.
+
+hosp/diagnoses_icd:
+  diagnosis:
+    code:
+      - DIAGNOSIS
+      - ICD
+      - col(icd_version)
+      - col(icd_code)
+    hadm_id: hadm_id
+    time: col(dischtime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+
+hosp/drgcodes:
+  drg:
+    code:
+      - DRG
+      - col(drg_type)
+      - col(drg_code)
+      - col(description)
+    hadm_id: hadm_id
+    time: col(dischtime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    drg_severity: drg_severity
+    drg_mortality: drg_mortality
+
+hosp/emar:
+  medication:
+    code:
+      - MEDICATION
+      - col(medication)
+      - col(event_txt)
+    time: col(charttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    hadm_id: hadm_id
+    emar_id: emar_id
+    emar_seq: emar_seq
+
+ed/pyxis:
+  medication:
+    code:
+      - MEDICATION
+      - col(name)
+      - Administered # to be compatible with hosp/emar
+    time: col(charttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    stay_id: stay_id
+
+hosp/hcpcsevents:
+  hcpcs:
+    code:
+      - HCPCS
+      - col(short_description)
+    hadm_id: hadm_id
+    time: col(chartdate)
+    time_format: "%Y-%m-%d"
+
+hosp/labevents:
+  lab:
+    code:
+      - LAB
+      - col(itemid)
+      - col(valueuom)
+    hadm_id: hadm_id
+    time: col(charttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    numeric_value: valuenum
+    text_value: value
+    priority: priority
+
+ed/vitalsign:
+  temperature:
+    code: TEMPERATURE
+    numeric_value: temperature
+    time: col(charttime)
+    time_format:
+      - "%Y-%m-%d %H:%M:%S"
+    stay_id: stay_id
+  heart_rate:
+    code: HEART_RATE
+    numeric_value: heartrate
+    time: col(charttime)
+    time_format:
+      - "%Y-%m-%d %H:%M:%S"
+    stay_id: stay_id
+  respiratory_rate:
+    code: RESPIRATORY_RATE
+    numeric_value: resprate
+    time: col(charttime)
+    time_format:
+      - "%Y-%m-%d %H:%M:%S"
+    stay_id: stay_id
+  o2_saturation:
+    code: O2_SATURATION
+    numeric_value: o2sat
+    time: col(charttime)
+    time_format:
+      - "%Y-%m-%d %H:%M:%S"
+    stay_id: stay_id
+  blood_pressure:
+    code: "Blood Pressure"
+    numeric_value: sbp
+    text_value: dbp
+    time: col(charttime)
+    time_format:
+      - "%Y-%m-%d %H:%M:%S"
+    stay_id: stay_id
+  pain:
+    code: PAIN
+    text_value: pain
+    time: col(charttime)
+    time_format:
+      - "%Y-%m-%d %H:%M:%S"
+    stay_id: stay_id
+
+hosp/omr:
+  omr:
+    code: col(result_name)
+    text_value: col(result_value)
+    time: col(chartdate)
+    time_format: "%Y-%m-%d"
+
+hosp/patients:
+  gender:
+    code:
+      - GENDER
+      - col(gender)
+    time: null
+  dob:
+    code: MEDS_BIRTH # This is the MEDS official code for birth.
+    time: col(year_of_birth)
+    time_format: "%Y"
+  death:
+    code: MEDS_DEATH # This is the MEDS official code for death.
+    time: col(dod)
+    time_format:
+      - "%Y-%m-%d %H:%M:%S"
+      - "%Y-%m-%d"
+
+#hosp/pharmacy:
+#  medication_start:
+#    code:
+#      - MEDICATION
+#      - START
+#      - col(medication)
+#    time: col(starttime)
+#    route: route
+#    frequency: frequency
+#    doses_per_24_hrs: doses_per_24_hrs
+#    poe_id: poe_id
+#    time_format:
+#      - "%Y-%m-%d %H:%M:%S"
+#      - "%Y-%m-%d"
+#  medication_stop:
+#    code:
+#      - MEDICATION
+#      - STOP
+#      - col(medication)
+#    time: col(stoptime)
+#    poe_id: poe_id
+#    time_format:
+#      - "%Y-%m-%d %H:%M:%S"
+#      - "%Y-%m-%d"
+
+hosp/procedures_icd:
+  procedure:
+    code:
+      - PROCEDURE
+      - ICD
+      - col(icd_version)
+      - col(icd_code)
+    hadm_id: hadm_id
+    time: col(chartdate)
+    time_format: "%Y-%m-%d"
+
+hosp/transfers:
+  transfer:
+    code:
+      - TRANSFER_TO
+      - col(eventtype)
+      - col(careunit)
+    time: col(intime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    hadm_id: hadm_id
+
+icu/icustays:
+  icu_admission:
+    code:
+      - ICU_ADMISSION
+      - col(first_careunit)
+    time: col(intime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    hadm_id: hadm_id
+    icustay_id: stay_id
+  icu_discharge:
+    code:
+      - ICU_DISCHARGE
+      - col(last_careunit)
+    time: col(outtime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    hadm_id: hadm_id
+    icustay_id: stay_id
+
+#icu/chartevents:
+#  event:
+#    code:
+#      - LAB
+#      - col(itemid)
+#      - col(valueuom)
+#    time: col(charttime)
+#    time_format: "%Y-%m-%d %H:%M:%S"
+#    numeric_value: valuenum
+#    text_value: value
+#    hadm_id: hadm_id
+#    icustay_id: stay_id
+
+#icu/procedureevents:
+#  start:
+#    code:
+#      - PROCEDURE
+#      - START
+#      - col(itemid)
+#    time: col(starttime)
+#    time_format: "%Y-%m-%d %H:%M:%S"
+#    hadm_id: hadm_id
+#    icustay_id: stay_id
+#  end:
+#    code:
+#      - PROCEDURE
+#      - END
+#      - col(itemid)
+#    time: col(endtime)
+#    time_format: "%Y-%m-%d %H:%M:%S"
+#    hadm_id: hadm_id
+#    icustay_id: stay_id
+#
+#icu/inputevents:
+#  input_start:
+#    code:
+#      - INFUSION_START
+#      - col(itemid)
+#    time: col(starttime)
+#    time_format: "%Y-%m-%d %H:%M:%S"
+#    hadm_id: hadm_id
+#    icustay_id: stay_id
+#    order_id: orderid
+#    link_order_id: linkorderid
+#    numeric_value: rate
+#    unit: rateuom
+#    ordercategorydescription: ordercategorydescription
+#  input_end:
+#    code:
+#      - INFUSION_END
+#      - col(itemid)
+#    time: col(endtime)
+#    time_format: "%Y-%m-%d %H:%M:%S"
+#    hadm_id: hadm_id
+#    icustay_id: stay_id
+#    order_id: orderid
+#    link_order_id: linkorderid
+#    numeric_value: amount
+#    ordercategorydescription: ordercategorydescription
+#    statusdescription: statusdescription
+#    unit: amountuom
+#  subject_weight:
+#    code:
+#      - SUBJECT_WEIGHT_AT_INFUSION
+#      - KG
+#    time: col(starttime)
+#    time_format: "%Y-%m-%d %H:%M:%S"
+#    numeric_value: patientweight
+#
+#icu/outputevents:
+#  output:
+#    code:
+#      - SUBJECT_FLUID_OUTPUT
+#      - col(itemid)
+#      - col(valueuom)
+#    time: col(charttime)
+#    time_format: "%Y-%m-%d %H:%M:%S"
+#    hadm_id: hadm_id
+#    icustay_id: stay_id
+#    numeric_value: value
