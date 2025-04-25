@@ -1,151 +1,82 @@
-from tokenizer.constants import SpecialToken as ST
-from tokenizer.datasets import TimelineDataset
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Subset
-
-train_dataset = TimelineDataset(
-    input_dir="/workspace/ehr_stuff/EHR_FM/data/tokenized_datasets/mimic_train",
-    n_positions=2048,
-    is_encoder_decoder=False,
-)
-
-vocab = train_dataset.vocab
-
-vocab_size = (len(vocab) // 64 + 1) * 64 if len(vocab) % 64 != 0 else len(vocab)
-tokens_of_interest = [ST.DEATH, ST.ADMISSION, ST.DISCHARGE]
-tokens_of_interest = {stoken: vocab.encode(stoken) for stoken in tokens_of_interest}
-
-print(tokens_of_interest) # from admissions table
-
-val_size = int(6 * 1_000_000)
-train_dataset, val_dataset = (
-    Subset(train_dataset, indices=indices)
-    for indices in torch.split_with_sizes(
-        torch.arange(len(train_dataset)), [len(train_dataset) - val_size, val_size]
-    )
-)
-
-
-def make_infinite_loader(loader):
-    while True:
-        yield from iter(loader)
-
-train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-train_dataloader = make_infinite_loader(train_dataloader)
-
-val_dataloader = DataLoader(val_dataset, batch_size=128, shuffle=True)
-val_dataloader = make_infinite_loader(val_dataloader)
-
-# test the dataloader
-batch = next(iter(train_dataloader))
-print(batch[0].shape)
-vocab.encode("MEDS_DEATH")
-eval_iters = len(val_dataset) // (32 * 2048) + 1
-vocab.decode(batch[0][0][200:250])
-
-
-
-## modelling
-from transformers import BertConfig, EncoderDecoderConfig, EncoderDecoderModel, GPT2Config
-config = GPT2Config(
-    vocab_size=vocab_size,
-    n_positions=2048,
-    n_embd=64,
-    n_layer=1, ## change this stuff later if the model is bad
-    n_head=4,
-    n_inner=None,
-    activation_function="gelu",
-    resid_pdrop=0, ## change this stuff later if the model is bad
-    embd_pdrop=0, ## change this stuff later if the model is bad
-    attn_pdrop=0, ## change this stuff later if the model is bad
-    bias=False, # model doesn't perform well without bias
-)
-
-
-## model.py
+from torch.utils.data.distributed import DistributedSampler
+import os
+import time
 import math
-from collections import namedtuple
-from functools import lru_cache
-
-import torch
-import torch.nn as nn
-import transformers.activations
-from torch.nn import functional as F
+import inspect
+from pathlib import Path
+from collections import namedtuple, defaultdict
+import numpy as np
+import hydra
+from omegaconf import DictConfig, OmegaConf
 from transformers import GPT2Config
+import transformers.activations
+
+from src.tokenizer.constants import SpecialToken as ST
+from src.tokenizer.datasets import TimelineDataset
+from src.tokenizer.vocabulary import Vocabulary # Assuming Vocabulary can be loaded this way
+from src.metrics import estimate_loss
+
 
 ModelOutput = namedtuple("ModelOutput", ["loss", "logits"])
 
-
-class CausalSelfAttention(nn.Module):
+class CausalSelfAttention(torch.nn.Module):
     def __init__(self, config, attention_weights: list | None = None):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        # regularization
-        self.attn_dropout = nn.Dropout(config.attn_pdrop)
-        self.resid_dropout = nn.Dropout(config.resid_pdrop)
+        self.c_attn = torch.nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        self.c_proj = torch.nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.attn_dropout = torch.nn.Dropout(config.attn_pdrop)
+        self.resid_dropout = torch.nn.Dropout(config.resid_pdrop)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.attn_pdrop
         self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
         if not self.flash or attention_weights is not None:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
-            self.register_buffer(
-                "bias",
-                torch.tril(torch.ones(config.n_positions, config.n_positions)).view(
+            # Register buffer correctly
+            bias = torch.tril(torch.ones(config.n_positions, config.n_positions)).view(
                     1, 1, config.n_positions, config.n_positions
-                ),
-                persistent=False,
-            )
-        self.attention_weights = attention_weights
+                )
+            self.register_buffer("bias", bias, persistent=False)
+
+        self.attention_weights = attention_weights # Store passed list reference
 
     def forward(self, x):
-        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
-
-        # calculate query, key, values for all heads in batch and move head forward to be the
-        # batch dim
+        B, T, C = x.size()
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash and self.attention_weights is None:
-            # efficient attention using Flash Attention CUDA kernels
             y = torch.nn.functional.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=None,
-                dropout_p=self.dropout if self.training else 0,
-                is_causal=True,
+                q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True
             )
         else:
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            # Use the registered buffer
             att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
-            att = F.softmax(att, dim=-1)
+            att = torch.nn.functional.softmax(att, dim=-1)
             att = self.attn_dropout(att)
-            y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-            self.attention_weights.append(att.detach().cpu())
-        y = (
-            y.transpose(1, 2).contiguous().view(B, T, C)
-        )  # re-assemble all head outputs side by side
-
-        # output projection
+            y = att @ v
+            if self.attention_weights is not None: # Check if list exists
+                 self.attention_weights.append(att.detach().cpu())
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.resid_dropout(self.c_proj(y))
         return y
 
-
-class MLP(nn.Module):
+class MLP(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.c_fc = torch.nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.activation = transformers.activations.get_activation(config.activation_function)
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
-        self.dropout = nn.Dropout(config.resid_pdrop)
+        self.c_proj = torch.nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.dropout = torch.nn.Dropout(config.resid_pdrop)
 
     def forward(self, x):
         x = self.c_fc(x)
@@ -154,13 +85,12 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
 
-
-class Block(nn.Module):
+class Block(torch.nn.Module):
     def __init__(self, config, attention_weights: list | None = None):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_1 = torch.nn.LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config, attention_weights=attention_weights)
-        self.ln_2 = nn.LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_2 = torch.nn.LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
     def forward(self, x):
@@ -168,34 +98,24 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
-
-class GPT2LMNoBiasModel(nn.Module):
-    def __init__(
-        self,
-        config: GPT2Config,
-        return_attention=False,
-    ):
+class GPT2LMNoBiasModel(torch.nn.Module):
+    def __init__(self, config: GPT2Config, return_attention=False):
         super().__init__()
-        self.config = config
-
+        self.config = config # Store config
         self.return_attention = return_attention
         self.attention_weights = [] if return_attention else None
 
-        self.transformer = nn.ModuleDict(
-            dict(
-                wte=nn.Embedding(config.vocab_size, config.n_embd),
-                wpe=nn.Embedding(config.n_positions, config.n_embd),
-                drop=nn.Dropout(config.embd_pdrop),
-                h=nn.ModuleList(
-                    [Block(config, self.attention_weights) for _ in range(config.n_layer)]
-                ),
-                ln_f=nn.LayerNorm(config.n_embd, bias=config.bias),
-            )
-        )
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.transformer = torch.nn.ModuleDict(dict(
+            wte=torch.nn.Embedding(config.vocab_size, config.n_embd),
+            wpe=torch.nn.Embedding(config.n_positions, config.n_embd),
+            drop=torch.nn.Dropout(config.embd_pdrop),
+            # Pass the potentially existing list to Block
+            h=torch.nn.ModuleList([Block(config, self.attention_weights) for _ in range(config.n_layer)]),
+            ln_f=torch.nn.LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        self.lm_head = torch.nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer.wte.weight = self.lm_head.weight
 
-        # init all weights
         self.apply(self._init_weights)
         for pn, p in self.named_parameters():
             if pn.endswith("c_proj.weight"):
@@ -206,14 +126,13 @@ class GPT2LMNoBiasModel(nn.Module):
 
     @staticmethod
     def _init_weights(module):
-        if isinstance(module, nn.Linear):
+        if isinstance(module, torch.nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
+        elif isinstance(module, torch.nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    @lru_cache
     def num_parameters(self, exclude_embeddings=True):
         n_params = sum(p.numel() for p in self.parameters())
         if exclude_embeddings:
@@ -221,8 +140,11 @@ class GPT2LMNoBiasModel(nn.Module):
         return n_params
 
     def forward(self, input_ids, labels=None) -> ModelOutput:
-        _, t = input_ids.size()
-        if self.return_attention:
+        b, t = input_ids.size()
+        if t > self.config.n_positions: # Use stored config
+             raise ValueError(f"Cannot forward sequence of length {t}, block size is only {self.config.n_positions}")
+
+        if self.return_attention and self.attention_weights is not None:
             self.attention_weights.clear()
 
         tok_emb = self.transformer.wte(input_ids)
@@ -234,232 +156,371 @@ class GPT2LMNoBiasModel(nn.Module):
 
         if labels is not None:
             logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
+            # Ensure labels are long type and handle ignore_index if necessary
+            loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1).long(), ignore_index=-100)
         else:
-            logits = self.lm_head(x[:, [-1], :])
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
 
         return ModelOutput(loss=loss, logits=logits)
 
     @torch.no_grad()
     def get_next_token(self, x: torch.Tensor, return_probs: bool = False, top_k: int | None = None):
-        logits = self(x).logits
-        logits = logits[:, -1, :]
+        logits = self(x).logits # Call forward
+        logits = logits[:, -1, :] # Get the last token logits
         if top_k is not None:
             v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-            logits[logits < v[:, [-1]]] = -float("Inf")
-        probs = F.softmax(logits, dim=-1)
-        next_token = torch.multinomial(probs, num_samples=1)
+            logits[logits < v[:, [-1]]] = -float("Inf") # Apply top-k filtering
+        probs = torch.nn.functional.softmax(logits, dim=-1) # Get probabilities
+        next_token = torch.multinomial(probs, num_samples=1) # Sample next token
         if return_probs:
             return next_token, probs
         return next_token
-    
-model = GPT2LMNoBiasModel(config)
 
 
-## training
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
-
-# scaler
-scaler = torch.amp.GradScaler("float16")
-
-
-
-## replace with hydra 
-class TrainConfig:
-    max_iters = 600000 
-    lr = 6e-4 
-    weight_decay = 1e-1
-    beta1 = 0.9
-    beta2 = 0.95
-    grad_clip = 1.0 
-    decay_lr = True
-    warmup_iters = 2000 
-    lr_decay_iters = max_iters 
-    min_lr = lr / 10 
-    eval_interval = 2000
-    eval_iters = eval_iters
-    log_interval = 10
-    out_dir = "outs/"
-    save_checkpoints = True
-    device = device 
-    dtype = 'float16'
-    gradient_accumulation_steps = 2 * 8 # gpu times accumulation steps 
-    ## add batch size to config
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    # Initialize the process group
+    # Use 'nccl' backend for NVIDIA GPUs
+    # Use 'gloo' backend for CPU training or if nccl is not available
+    backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+    dist.init_process_group(backend, rank=rank, world_size=world_size)
+    print(f"Rank {rank}/{world_size} initialized process group with backend '{backend}'.")
 
 
-# config
-cfg = TrainConfig()
+def cleanup():
+    dist.destroy_process_group()
+    print("Cleaned up process group.")
 
-from pathlib import Path
-import numpy as np 
-
-out_dir_path = Path(cfg.out_dir)
-out_dir_path.mkdir(parents=True, exist_ok=True)
-
-
-## from paper -- linear warmup, returns min lr, then applying cosine decay to lr
-def get_lr(it):
-    if it < cfg.warmup_iters:
-        return cfg.lr * it / cfg.warmup_iters
-    if it > cfg.lr_decay_iters:
-        return cfg.min_lr
-    decay_ratio = (it - cfg.warmup_iters) / (cfg.lr_decay_iters - cfg.warmup_iters)
+def get_lr(it, cfg_training: DictConfig):
+    # 1) linear warmup for warmup_iters steps
+    if it < cfg_training.warmup_iters:
+        return cfg_training.lr * it / cfg_training.warmup_iters
+    # 2) if it > lr_decay_iters, return min learning rate
+    if it > cfg_training.lr_decay_iters:
+        return cfg_training.min_lr
+    # 3) in between, use cosine decay down to min learning rate
+    decay_ratio = (it - cfg_training.warmup_iters) / (cfg_training.lr_decay_iters - cfg_training.warmup_iters)
     assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # starts at 1 and goes to 0
-    return cfg.min_lr + coeff * (cfg.lr - cfg.min_lr)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
+    return cfg_training.min_lr + coeff * (cfg_training.lr - cfg_training.min_lr)
 
-
-import inspect
-## same as ethos and andrey karpathy's nanoGPT
 def configure_optimizers(model: torch.nn.Module, weight_decay, learning_rate, betas, device_type):
-    # start with all of the candidate parameters
-    param_dict = {pn: p for pn, p in model.named_parameters()}
-    # filter out those that do not require grad
+    param_dict = {pn: p for pn, p in model.named_parameters()} # start with all and filter later
     param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-    # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-    # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+    # weight decay for >=2 dims
     decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
     nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
     optim_groups = [
-        {"params": decay_params, "weight_decay": weight_decay},
-        {"params": nodecay_params, "weight_decay": 0.0},
+        {'params': decay_params, 'weight_decay': weight_decay},
+        {'params': nodecay_params, 'weight_decay': 0.0}
     ]
-    sum(p.numel() for p in decay_params)
-    sum(p.numel() for p in nodecay_params)
-    # Create AdamW optimizer and use the fused version if it is available
-    fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
-    use_fused = fused_available and "cuda" in device_type
+    num_decay_params = sum(p.numel() for p in decay_params)
+    num_nodecay_params = sum(p.numel() for p in nodecay_params)
+    print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+    print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+    fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+    use_fused = fused_available and device_type == 'cuda'
     extra_args = dict(fused=True) if use_fused else dict()
     optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-
+    print(f"using fused AdamW: {use_fused}")
     return optimizer
 
-
-def get_batch(split) -> tuple[torch.Tensor | tuple, torch.Tensor]:
-    data = train_dataloader if split == "train" else val_dataloader
-    x, y = next(data)
-    y = y.to(device, non_blocking=True)
-    if isinstance(x, list):
-        return (x[0].to(device, non_blocking=True), x[1].to(device, non_blocking=True)), y
-    return x.to(device, non_blocking=True), y
-
-
-from .metrics import estimate_loss
-
-
-
-## auto cast
-ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[cfg.dtype]
-ctx = torch.amp.autocast(device_type=cfg.device.type, dtype=ptdtype) # Use device.type for cpu/cuda
-print(f"Autocast context manager created for device '{cfg.device.type}' with dtype '{ptdtype}'.")
-
-# Optimizer
-optimizer = configure_optimizers(model, cfg.weight_decay, cfg.lr, (cfg.beta1, cfg.beta2), cfg.device.type)
-print("Optimizer configured.")
-
-
-
-## add resume from ckpt logic!!!
-iter_num = 0
-best_val_loss = 1e9
-
-print("Starting training loop...")
-try:
-    X, Y = get_batch("train")
-except ValueError as e:
-    print(f"Error getting initial batch: {e}")
-    exit()
-    
-    
-    
-import time    
-t0 = time.time()
-local_iter_num = 0
-running_mfu = -1.0
-
-while True:
-    lr = get_lr(iter_num) if cfg.decay_lr else cfg.lr
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = lr
+def make_infinite_loader(loader):
+    while True:
+        yield from iter(loader)
         
-    if iter_num % cfg.eval_interval == 0 and cfg.eval_iters > 0:
-        losses = estimate_loss(model, ctx, get_batch, cfg.eval_iters, tokens_of_interest)
-        val_loss = losses.get('loss/val', float('nan')) 
-        print(f"step {iter_num}: train loss {losses['loss/train']:.4f}, val loss {val_loss:.4f}")
+        
+def train_worker(rank, world_size, cfg: DictConfig):
+    print(f"Running DDP training worker on rank {rank}.")
+    setup(rank, world_size)
 
-        if not math.isnan(val_loss) and val_loss < best_val_loss:
-            best_val_loss = val_loss
-            if cfg.save_checkpoints:
-                checkpoint = {
-                    "iter_num": iter_num,
-                    "model": model.state_dict(), 
-                    "optimizer": optimizer.state_dict(),
-                    "best_val_loss": best_val_loss,
-                    "config": config, 
-                    "vocab": vocab.stoi, 
-                }
-                ckpt_path = out_dir_path / "best_model.pt"
-                ## recent ckpt saving logic
-                print(f"Saving checkpoint to {ckpt_path} (Val Loss: {best_val_loss:.4f})")
-                torch.save(checkpoint, ckpt_path)
-                
-            ## add metric calculation --> time over iteration etc. 
-            ## add logging to wandb / tensorboard
-            
-    for micro_step in range(cfg.gradient_accumulation_steps):
-        # ddp logic?? look into this. 
-        with ctx:
-            output = model(X, Y) # Forward pass
-            loss = output.loss
-            # Scale loss 
-            loss = loss / cfg.gradient_accumulation_steps
+    if torch.cuda.is_available():
+        torch.cuda.set_device(rank)
+        device = torch.device(f"cuda:{rank}")
+    else:
+        device = torch.device("cpu")
+    print(f"Rank {rank} using device: {device}")
 
-        if micro_step < cfg.gradient_accumulation_steps - 1:
-             X_next, Y_next = get_batch("train") # get next batch
-        scaler.scale(loss).backward()
-        if micro_step < cfg.gradient_accumulation_steps - 1:
-            X, Y = X_next, Y_next
-            
-    if cfg.grad_clip != 0.0:
-        # gradient clipping
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+    # load vocab for all ranks / processes ? 
+    try:
+        vocab_dir = Path(cfg.data.tokenized_dir)
+        vocab = Vocabulary.from_path(vocab_dir)
+        vocab_size = (len(vocab) // 64 + 1) * 64 if len(vocab) % 64 != 0 else len(vocab)
+        print(f"Rank {rank} loaded vocabulary with size {len(vocab)} (padded: {vocab_size}).")
+        tokens_of_interest = {stoken: vocab.encode(stoken) for stoken in [ST.DEATH, ST.ADMISSION, ST.DISCHARGE] if stoken in vocab.stoi}
+        print(f"Rank {rank} Tokens of Interest: {tokens_of_interest}")
+    except Exception as e:
+        print(f"Rank {rank} FAILED to load vocabulary from {cfg.data.tokenized_dir}: {e}")
+        cleanup()
+        return 
+
+    try:
+        full_dataset = TimelineDataset(
+            input_dir=cfg.data.tokenized_dir,
+            n_positions=cfg.model.n_positions,
+            is_encoder_decoder=False,
+        )
+        print(f"Rank {rank} loaded full dataset with {len(full_dataset)} samples.")
+
+        val_split_count = int(cfg.data.val_split_fraction * len(full_dataset))
+        train_split_count = len(full_dataset) - val_split_count
+        generator = torch.Generator().manual_seed(42) # Use a fixed seed for splitting
+        train_indices, val_indices = torch.utils.data.random_split(
+            range(len(full_dataset)), [train_split_count, val_split_count], generator=generator
+        )
+        train_dataset = Subset(full_dataset, train_indices)
+        val_dataset = Subset(full_dataset, val_indices)
+        print(f"Rank {rank} - Train size: {len(train_dataset)}, Val size: {len(val_dataset)}")
+
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+
+        # optimal??? batch size = batch_size_per_gpu * world_size * gradient_accumulation_steps
+        batch_size_per_gpu = cfg.train.batch_size // (world_size * cfg.train.gradient_accumulation_steps)
+        if batch_size_per_gpu < 1:
+             print(f"WARNING: Calculated batch_size_per_gpu is {batch_size_per_gpu}. Setting to 1. Adjust total batch size, world size, or grad accum steps.")
+             batch_size_per_gpu = 1
+        print(f"Rank {rank} - Batch size per GPU: {batch_size_per_gpu}")
 
 
-    scaler.step(optimizer) 
-    scaler.update() 
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size_per_gpu, sampler=train_sampler, num_workers=cfg.train.num_workers, pin_memory=True)
+        val_dataloader = DataLoader(val_dataset, batch_size=batch_size_per_gpu, sampler=val_sampler, num_workers=cfg.train.num_workers, pin_memory=True)
 
-    optimizer.zero_grad(set_to_none=True)
+        train_dataloader = make_infinite_loader(train_dataloader)
+        val_dataloader = make_infinite_loader(val_dataloader)
+        print(f"Rank {rank} created DataLoaders.")
 
-    t1 = time.time()
-    dt = t1 - t0 
-    t0 = t1 
+    except Exception as e:
+        print(f"Rank {rank} FAILED during data loading: {e}")
+        import traceback
+        traceback.print_exc()
+        cleanup()
+        return # Exit if data loading fails
+
+
+    # check if _target_ is defined
+    if "_target_" in cfg.model:
+         model_config = hydra.utils.instantiate(cfg.model, vocab_size=vocab_size, _recursive_=False)
+         print(f"Rank {rank} instantiated model config from target: {cfg.model._target_}")
+    else:
+         model_config = GPT2Config(
+             vocab_size=vocab_size,
+             n_positions=cfg.model.n_positions,
+             n_embd=cfg.model.n_embd,
+             n_layer=cfg.model.n_layer,
+             n_head=cfg.model.n_head,
+             activation_function=cfg.model.activation_function,
+             resid_pdrop=cfg.model.resid_pdrop,
+             embd_pdrop=cfg.model.embd_pdrop,
+             attn_pdrop=cfg.model.attn_pdrop,
+             bias=cfg.model.bias,
+         )
+         print(f"Rank {rank} manually created model config.")
+
+    model = GPT2LMNoBiasModel(model_config).to(device)
+    print(f"Rank {rank} initialized model.")
+
+    if world_size > 1:
+        model = DDP(model, device_ids=[rank], find_unused_parameters=cfg.train.ddp_find_unused_params) # Set find_unused_parameters based on config
+        print(f"Rank {rank} wrapped model with DDP.")
+        raw_model = model.module # Get underlying model for saving etc.
+    else:
+        raw_model = model # No DDP wrapping needed
+
+    scaler = torch.amp.GradScaler(enabled=(cfg.train.dtype == 'float16'))
+    optimizer = configure_optimizers(model, cfg.train.weight_decay, cfg.train.lr, (cfg.train.beta1, cfg.train.beta2), device.type)
+    print(f"Rank {rank} configured optimizer and scaler (enabled: {scaler.is_enabled()}).")
+
+    ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[cfg.train.dtype]
+    autocast_enabled = (cfg.train.dtype != 'float32')
+    ctx = torch.amp.autocast(device_type=device.type, dtype=ptdtype, enabled=autocast_enabled)
+    print(f"Rank {rank} using autocast with dtype: {ptdtype} (enabled: {autocast_enabled})")
+
+    # ctx = torch.amp.autocast(device_type=device.type, dtype=ptdtype, enabled=(cfg.train.dtype != 'float32'))
+    # print(f"Rank {rank} using autocast with dtype: {ptdtype} (enabled: {ctx.is_enabled()})")
+
+    # ckpt loading
+    iter_num = 0
+    best_val_loss = 1e9
+    if cfg.train.resume_from_checkpoint:
+        ckpt_path = Path(cfg.train.resume_from_checkpoint)
+        if ckpt_path.exists():
+            print(f"Rank {rank} attempting to resume from checkpoint: {ckpt_path}")
+            map_location = {'cuda:%d' % 0: 'cuda:%d' % rank} if torch.cuda.is_available() else device
+            checkpoint = torch.load(ckpt_path, map_location=map_location)
+            try:
+                raw_model.load_state_dict(checkpoint['model'])
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                iter_num = checkpoint['iter_num']
+                best_val_loss = checkpoint['best_val_loss']
+                if 'scaler' in checkpoint:
+                    scaler.load_state_dict(checkpoint['scaler'])
+                print(f"Rank {rank} successfully resumed from iteration {iter_num} with best_val_loss {best_val_loss:.4f}")
+            except Exception as e:
+                print(f"Rank {rank} FAILED to load state dicts from checkpoint: {e}. Starting from scratch.")
+                iter_num = 0
+                best_val_loss = 1e9
+        else:
+            print(f"Rank {rank} - Checkpoint path not found: {ckpt_path}. Starting from scratch.")
+
+
+    def get_batch_worker(split):
+        loader = train_dataloader if split == "train" else val_dataloader
+        x, y = next(loader) # Sampler handles distribution
+        y = y.to(device, non_blocking=True)
+        if isinstance(x, (list, tuple)): # Handle potential tuple/list input from dataset
+            return tuple(t.to(device, non_blocking=True) for t in x), y
+        return x.to(device, non_blocking=True), y
+
+    print(f"Rank {rank} starting training loop from iteration {iter_num}...")
+    t0 = time.time()
+    local_iter_num = 0 # Tracks iterations within this run
+
+    while iter_num < cfg.train.max_iters:
+        lr = get_lr(iter_num, cfg.train) if cfg.train.decay_lr else cfg.train.lr
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+
+        if iter_num % cfg.train.eval_interval == 0 and cfg.train.eval_iters > 0:
+            if rank == 0:
+                print(f"\nRank {rank} evaluating at step {iter_num}...")
+                # Pass the underlying model (raw_model) to estimate_loss if needed
+                # estimate_loss should handle the device placement internally or via get_batch_worker
+                losses = estimate_loss(raw_model, ctx, get_batch_worker, cfg.train.eval_iters, tokens_of_interest)
+                val_loss = losses.get('loss/val', float('nan'))
+                print(f"--- Eval Results ---")
+                for k, v in losses.items():
+                     print(f"{k}: {v:.4f}")
+                print(f"--------------------")
+
+
+                if cfg.train.save_checkpoints and not math.isnan(val_loss) and val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    checkpoint = {
+                        'iter_num': iter_num,
+                        'model': raw_model.state_dict(), # Save the underlying model's state_dict
+                        'optimizer': optimizer.state_dict(),
+                        'scaler': scaler.state_dict(), # Save scaler state
+                        'best_val_loss': best_val_loss,
+                        'model_config': raw_model.config, # Save original model config
+                        'vocab': vocab.stoi,
+                        'hydra_config': OmegaConf.to_container(cfg, resolve=True) # Save full config
+                    }
+                    ckpt_path = Path(cfg.train.out_dir) / "best_model.pt"
+                    print(f"Saving checkpoint to {ckpt_path} (Val Loss: {best_val_loss:.4f})")
+                    torch.save(checkpoint, ckpt_path)
+
+                    recent_ckpt_path = Path(cfg.train.out_dir) / f"ckpt_{iter_num}.pt"
+                    print(f"Saving recent checkpoint to {recent_ckpt_path}")
+                    torch.save(checkpoint, recent_ckpt_path)
+
+
+            if world_size > 1:
+                dist.barrier()
+
+        model.train() # Ensure model is in training mode
+        optimizer.zero_grad(set_to_none=True)
+        total_loss_accum = 0.0 
+
+        for micro_step in range(cfg.train.gradient_accumulation_steps):
+            is_sync_step = (micro_step == cfg.train.gradient_accumulation_steps - 1)
+
+            with ctx:
+                X, Y = get_batch_worker("train")
+                output = model(X, Y)
+                loss = output.loss
+                loss = loss / cfg.train.gradient_accumulation_steps
+                total_loss_accum += loss.item() # Accumulate item for logging
+            scaler.scale(loss).backward()
+
+        if cfg.train.grad_clip > 0.0:
+            scaler.unscale_(optimizer) # Unscale gradients before clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
+        scaler.step(optimizer) # Optimizer step
+        scaler.update() 
+
+        if rank == 0:
+            t1 = time.time()
+            dt = t1 - t0
+            t0 = t1
+            if iter_num % cfg.train.log_interval == 0:
+                # Note: total_loss_accum is already scaled by grad_accum_steps
+                lossf = total_loss_accum # Log the average loss over the microsteps
+                print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, lr {lr:.6f}")
+                # Add WandB or TensorBoard logging here if desired
+
+        iter_num += 1
+        local_iter_num += 1
+
+
+        if iter_num >= cfg.train.max_iters:
+             print(f"Rank {rank} reached max iterations ({cfg.train.max_iters}).")
+             break
+
+    if rank == 0 and cfg.train.save_checkpoints:
+        final_checkpoint = {
+            'iter_num': iter_num,
+            'model': raw_model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'scaler': scaler.state_dict(),
+            'best_val_loss': best_val_loss,
+            'model_config': raw_model.config,
+            'vocab': vocab.stoi,
+            'hydra_config': OmegaConf.to_container(cfg, resolve=True)
+        }
+        final_ckpt_path = Path(cfg.train.out_dir) / "final_model.pt"
+        print(f"Saving final model checkpoint to {final_ckpt_path}")
+        torch.save(final_checkpoint, final_ckpt_path)
+
+    cleanup() # Clean up distributed processes
+    print(f"Rank {rank} finished training worker.")
+
+@hydra.main(version_base=None, config_path="conf", config_name="config")
+def main_hydra(cfg: DictConfig):
+    print("--- Hydra Configuration ---")
+    print(OmegaConf.to_yaml(cfg))
+    print("--------------------------")
     
-    if iter_num % cfg.log_interval == 0:
-        lossf = loss.item() * cfg.gradient_accumulation_steps
-        # Model flops calculation?? 
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, lr {lr:.6f}")
-
-    iter_num += 1
-    local_iter_num += 1
-
-    if iter_num > cfg.max_iters:
-        print(f"Maximum iterations ({cfg.max_iters}) reached. Exiting training loop.")
-        break
     
-print("Training finished.")
-# save final state
-if cfg.save_checkpoints:
-    final_checkpoint = {
-        "iter_num": iter_num,
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "best_val_loss": best_val_loss, 
-        "config": config,
-        "vocab": vocab.stoi,
-    }
-    final_ckpt_path = out_dir_path / "final_model.pt"
-    print(f"Saving final model checkpoint to {final_ckpt_path}")
-    torch.save(final_checkpoint, final_ckpt_path)
+    curr_dir = os.getcwd()
+    print(f"Resolved output directory: {curr_dir}")
+    OmegaConf.set_struct(cfg, False) # Allow modification
+    cfg.train.out_dir = curr_dir
+    OmegaConf.set_struct(cfg, True) 
+    
+    
+    world_size = cfg.get("world_size", torch.cuda.device_count()) # Get from config or detect
+    if world_size > torch.cuda.device_count():
+         print(f"Warning: Requested world_size {world_size} > available GPUs {torch.cuda.device_count()}. Setting to {torch.cuda.device_count()}.")
+         world_size = torch.cuda.device_count()
+
+    if world_size == 0:
+        print("ERROR: No GPUs detected or requested. DDP training requires at least one GPU.")
+        return
+    elif world_size == 1:
+         print("Running on a single GPU. Spawning one process.")
+         mp.spawn(train_worker,
+                  args=(world_size, cfg), # Pass world_size=1
+                  nprocs=world_size,      # nprocs=1
+                  join=True)
+    else:
+         print(f"Spawning {world_size} processes for DDP training.")
+         mp.spawn(train_worker,
+                  args=(world_size, cfg), # Pass world_size and loaded hydra config
+                  nprocs=world_size,
+                  join=True)
+
+    if world_size > torch.cuda.device_count():
+         print(f"Warning: Requested world_size {world_size} > available GPUs {torch.cuda.device_count()}. Setting to {torch.cuda.device_count()}.")
+         world_size = torch.cuda.device_count()
+         
+
+             
+    print("Main process finished.")
+
+
+if __name__ == "__main__":
+    main_hydra()

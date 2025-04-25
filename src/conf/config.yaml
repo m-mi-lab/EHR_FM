@@ -1,0 +1,20 @@
+defaults:
+  - train: default 
+  - model: gpt2_small         
+  - data: mimic_data          
+  - _self_                    
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}_${hydra.job.override_dirname}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+     chdir: true
+
+project_name: EHR_FM
+seed: 42 
+
+world_size: 2 # python src.train.py world_size=4 , or auto detect gpus
+
