@@ -5,9 +5,11 @@ from datetime import timedelta
 from pathlib import Path
 
 import polars as pl
-import torch as th
-from safetensors.torch import save_file
+import torch
 
+from safetensors.torch import save_file
+import sys
+sys.path.append("..")
 from ..patterns import MatchAndRevise
 from ..constants import SpecialToken as ST
 from ..constants import STATIC_DATA_FN
@@ -16,7 +18,7 @@ from ._sharded_data import ShardedData
 
 
 
-class TimelineDataset(th.utils.data.Dataset):
+class TimelineDataset(torch.utils.data.Dataset):
     def __init__(
         self, input_dir: str | Path, n_positions: int = 2048, is_encoder_decoder: bool = False
     ):
@@ -38,7 +40,7 @@ class TimelineDataset(th.utils.data.Dataset):
         if is_encoder_decoder:
             self.timeline_size = n_positions
 
-        self.cxr_tokens = th.tensor(
+        self.cxr_tokens = torch.tensor(
             self.vocab.encode([stoken for stoken in self.vocab if stoken.startswith("CXR//")])
         )
 
@@ -51,16 +53,16 @@ class TimelineDataset(th.utils.data.Dataset):
         return self._data.times
 
     @property
-    def patient_ids(self) -> th.Tensor:
-        return th.cat([shard["patient_ids"] for shard in self._data.shards])
+    def patient_ids(self) -> torch.Tensor:
+        return torch.cat([shard["patient_ids"] for shard in self._data.shards])
 
     @property
     def patient_id_at_idx(self):
         return self._data.patient_id_at_idx
 
     @property
-    def patient_offsets(self) -> list[th.Tensor]:
-        return th.cat([shard["patient_offsets"] + shard["offset"] for shard in self._data.shards])
+    def patient_offsets(self) -> list[torch.Tensor]:
+        return torch.cat([shard["patient_offsets"] + shard["offset"] for shard in self._data.shards])
 
     @property
     def patient_offset_at_idx(self):
@@ -103,7 +105,7 @@ class TimelineDataset(th.utils.data.Dataset):
     def __len__(self) -> int:
         return len(self.tokens) - self.timeline_size
 
-    def __getitem__(self, idx: int) -> tuple[th.Tensor | tuple, th.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor | tuple, torch.Tensor]:
         pt_ctx = self._get_patient_context(idx)
         timeline = self.tokens[idx : idx + self.timeline_size + 1]
 
@@ -111,9 +113,9 @@ class TimelineDataset(th.utils.data.Dataset):
             return (pt_ctx, timeline[:-1]), timeline[1:]
 
         cxr_ids = None
-        if self.cxr_tokens.numel() and th.any(cxr_token_mask := th.isin(timeline, self.cxr_tokens)):
-            cxr_token_indices = th.nonzero(cxr_token_mask).view(-1)
-            cxr_ids = th.tensor(
+        if self.cxr_tokens.numel() and torch.any(cxr_token_mask := torch.isin(timeline, self.cxr_tokens)):
+            cxr_token_indices = torch.nonzero(cxr_token_mask).view(-1)
+            cxr_ids = torch.tensor(
                 [
                     self.dicom_id[idx + cxr_idx]
                     for i, cxr_idx in enumerate(cxr_token_indices, 1)
@@ -128,18 +130,18 @@ class TimelineDataset(th.utils.data.Dataset):
                 ptr = cxr_idx + 1
                 inserted_cxr_indices.append(ptr.item() + i)
             new_timeline.append(timeline[ptr : len(timeline) - len(cxr_ids)])
-            timeline = th.cat(new_timeline)
+            timeline = torch.cat(new_timeline)
 
-        x = th.cat((pt_ctx, timeline[:-1]))
+        x = torch.cat((pt_ctx, timeline[:-1]))
 
         if cxr_ids is not None and cxr_ids.numel():
             timeline[inserted_cxr_indices] = -100
 
-        y = th.cat((pt_ctx, timeline[1:]))
+        y = torch.cat((pt_ctx, timeline[1:]))
         y[: self.context_size] = -100
         return x, y
 
-    def _get_patient_context(self, idx: int) -> th.Tensor:
+    def _get_patient_context(self, idx: int) -> torch.Tensor:
         patient_id = self.patient_id_at_idx[idx].item()
         time_at_start = self.times[idx].item()
 
@@ -166,7 +168,7 @@ class TimelineDataset(th.utils.data.Dataset):
                 else:
                     idx = self._find_closest_index(token["time"], time_at_start)
                     static_tokens.append(token["code"][idx])
-        return th.tensor(self.vocab.encode(static_tokens))
+        return torch.tensor(self.vocab.encode(static_tokens))
 
     def _age_to_tokens(self, age_years: float) -> tuple[str]:
         age_scaled = age_years * self._num_quantiles**2 / 100
@@ -225,19 +227,19 @@ class InferenceDataset(TimelineDataset, abc.ABC):
     time_limit: timedelta = timedelta(days=365.25 * 2)  # Inference time constraint
 
     def _get_hadm_id(self, idx: int) -> int | None:
-        return None if th.isnan(hadm_id := self.hadm_id[idx]) else int(hadm_id)
+        return None if torch.isnan(hadm_id := self.hadm_id[idx]) else int(hadm_id)
 
     def _get_icu_stay_id(self, idx: int) -> int | None:
-        return None if th.isnan(icu_stay_id := self.icu_stay_id[idx]) else int(icu_stay_id)
+        return None if torch.isnan(icu_stay_id := self.icu_stay_id[idx]) else int(icu_stay_id)
 
     def _get_dicom_id(self, idx: int) -> str | None:
-        return None if th.isnan(dicom_id := self.dicom_id[idx]) else dicom_id
+        return None if torch.isnan(dicom_id := self.dicom_id[idx]) else dicom_id
 
     @abc.abstractmethod
     def __len__(self) -> int:
         pass
 
-    def __getitem__(self, idx: int) -> th.Tensor | tuple[th.Tensor, th.Tensor]:
+    def __getitem__(self, idx: int) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         data_start_idx = self.patient_offset_at_idx[idx]
         if idx - data_start_idx + 1 > self.timeline_size:
             data_start_idx = idx + 1 - self.timeline_size
@@ -246,38 +248,38 @@ class InferenceDataset(TimelineDataset, abc.ABC):
         timeline = self.tokens[data_start_idx : idx + 1]
         if self.is_encoder_decoder:
             return (pt_ctx, timeline)
-        return th.cat((pt_ctx, timeline))
+        return torch.cat((pt_ctx, timeline))
 
-    def _get_indices_of_stokens(self, stokens: str | Sequence[str]) -> th.Tensor:
+    def _get_indices_of_stokens(self, stokens: str | Sequence[str]) -> torch.Tensor:
         if isinstance(stokens, str):
             stokens = [stokens]
-        tokens_of_interest = th.tensor(self.vocab.encode(stokens))
+        tokens_of_interest = torch.tensor(self.vocab.encode(stokens))
         shard_indices = []
         token_offset = 0
         for token_chunk in self.tokens:
-            new_indices = th.nonzero(th.isin(token_chunk, tokens_of_interest)).view(-1)
+            new_indices = torch.nonzero(torch.isin(token_chunk, tokens_of_interest)).view(-1)
             new_indices += token_offset
             shard_indices.append(new_indices)
             token_offset += len(token_chunk)
 
-        return th.cat(shard_indices)
+        return torch.cat(shard_indices)
 
     def _match(
         self,
-        ordered_sequence: th.Tensor,
-        input: th.Tensor,
+        ordered_sequence: torch.Tensor,
+        input: torch.Tensor,
         *,
         fill_unmatched: int | None = None,
         shift: int = 0,
-    ) -> th.Tensor:
+    ) -> torch.Tensor:
         """TODO: Write a docstring, because this function is hell."""
-        ordered_sequence_indices = th.searchsorted(ordered_sequence, input, right=True)
+        ordered_sequence_indices = torch.searchsorted(ordered_sequence, input, right=True)
         if shift:
             ordered_sequence_indices += shift
         if fill_unmatched is None:
             return ordered_sequence[ordered_sequence_indices]
         else:
-            out = th.full_like(input, fill_value=fill_unmatched)
+            out = torch.full_like(input, fill_value=fill_unmatched)
             mask = ordered_sequence_indices < len(ordered_sequence)
             out[mask] = ordered_sequence[ordered_sequence_indices[mask]]
             return out

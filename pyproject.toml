@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ehr-fm"
+version = "0.1.0"
+description = "EHR : Foundational Model"
+readme = "README.md"
+authors = [
+    { name = "Sudhanva", email = "athreya.sud@gmail.com" },
+]
+maintainers = [
+    { name = "Sudhanva", email = "athreya.sud@gmail.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "torch",
+    "transformers",
+    "polars",
+    "hydra-core",
+    "hydra-joblib-launcher",
+    "loguru",
+    "safetensors",
+    "tqdm",
+    "wandb",
+    "MEDS_transforms~=0.1.0",
+    "pyarrow",
+    "numpy",
+    "pytorch-lightning"
+]
+
+[project.optional-dependencies]
+dev = ["pre-commit<4"]
+tests = ["pytest"]
+jupyter = ["jupyter", "seaborn", "scikit-learn", "matplotlib", "pandas", "altair", "pylatex", "vl-convert-python"]
+
+#[project.scripts]
+#ethos_tokenize = "ethos.tokenize.run_tokenization:main"
+#ethos_train = "ethos.train.run_training:main"
+#ethos_infer = "ethos.inference.run_inference:main"
+
+#[tool.setuptools.package-data]
+#ethos = ["tokenize/maps/*.csv.gz"]
