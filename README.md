@@ -8,5 +8,6 @@ pip install -e .[jupyter]
 ```
 
 ```
+python3 -m src.tokenizer.run_tokenization
 python3 -m src.train
 ```

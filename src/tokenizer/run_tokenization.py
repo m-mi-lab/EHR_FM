@@ -60,10 +60,10 @@ def main(cfg: DictConfig):
         if "transforms" in stage_cfg:
             for transform_name in stage_cfg.transforms:
                 logger.info(f"Loading transforms for stage {transform_name}")
-                func = load_function(transform_name, f"src.tokenize.{dataset}")
+                func = load_function(transform_name, f"src.tokenizer.{dataset}")
                 transform_fns.append(func)
         else:
-            func = load_function(stage_cfg.name, "src.tokenize.common")
+            func = load_function(stage_cfg.name, "src.tokenizer.common")
             transform_fns.append(func)
 
         run_stage(in_fps, out_fps, *transform_fns, worker=cfg.worker, **stage_cfg)

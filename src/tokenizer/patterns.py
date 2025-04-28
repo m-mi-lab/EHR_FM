@@ -6,8 +6,8 @@ sys.path.append("..")
 
 import polars as pl
 
-# from .vocabulary import Vocabulary
-# from ..utils import create_prefix_or_chain, unify_code_names
+from .vocabulary import Vocabulary
+from ..utils import create_prefix_or_chain, unify_code_names
 
 
 class MatchAndRevise:

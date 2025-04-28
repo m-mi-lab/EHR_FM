@@ -8,7 +8,7 @@ from pathlib import Path
 import os
 
 PROJECT_ROOT = Path(os.path.abspath(os.path.dirname(__file__))).parent
-MAPPINGS_DIR = PROJECT_ROOT / "tokenize" / "maps"
+MAPPINGS_DIR = PROJECT_ROOT / "tokenizer" / "maps"
 
 
 class SpecialToken(StrEnum):
