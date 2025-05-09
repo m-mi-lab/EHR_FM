@@ -9,8 +9,7 @@ from transformers import GPT2Config
 from src.manager import MANAGER
 
 from collections import namedtuple
-ModelOutput = namedtuple("ModelOutput", ["loss", "logits"])
-
+ModelOutput = namedtuple("ModelOutput", ["loss", "logits", "aux_loss", "router_z_loss"])
 
 class CausalSelfAttention(torch.nn.Module):
     def __init__(self, config, attention_weights: list | None = None):
@@ -237,21 +236,25 @@ class GPT2LMNoBiasModel(torch.nn.Module):
             # Ensure labels are long type and handle ignore_index if necessary
             loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1).long(), ignore_index=-100)
 
-            ## moe loss
-            is_moe_model = hasattr(self.config, 'n_experts') and getattr(self.config, 'n_experts', 0) > 1
-            if is_moe_model:
-                if getattr(self.config, 'use_aux_loss', False):
-                    loss += getattr(self.config, 'aux_loss_weight', 0.01) * MANAGER.aggregate_aux_loss()
-                    MANAGER.reset_aux_loss()
-                if getattr(self.config, 'use_router_z_loss', False):
-                    loss += getattr(self.config, 'router_z_loss_weight', 0.001) * MANAGER.aggregate_router_z_loss()
-                    MANAGER.reset_router_z_loss()
+         ## moe loss
+        is_moe_model = hasattr(self.config, 'n_experts') and getattr(self.config, 'n_experts', 0) > 1
+        if is_moe_model:
+            if getattr(self.config, 'use_aux_loss', False):
+                aux_loss = MANAGER.aggregate_aux_loss()
+                if aux_loss is not None:
+                    loss += getattr(self.config, 'aux_loss_weight', 0.01) * aux_loss
+                MANAGER.reset_aux_loss()
+            if getattr(self.config, 'use_router_z_loss', False):
+                router_z_loss = MANAGER.aggregate_router_z_loss()
+                if router_z_loss is not None:
+                    loss += getattr(self.config, 'router_z_loss_weight', 0.001) * router_z_loss
+                MANAGER.reset_router_z_loss()
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
 
-        return ModelOutput(loss=loss, logits=logits)
+        return ModelOutput(loss=loss, logits=logits, aux_loss=aux_loss, router_z_loss=router_z_loss)
 
     @torch.no_grad()
     def get_next_token(self, x: torch.Tensor, return_probs: bool = False, top_k: int | None = None):
