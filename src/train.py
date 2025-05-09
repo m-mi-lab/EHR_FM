@@ -201,19 +201,19 @@ def train_worker(rank, world_size, cfg: DictConfig):
          )
          logger.info(f"Rank {rank} manually created model config.")
 
-         is_moe_model = hasattr(model_config, 'n_experts') and model_config.n_experts > 1
+         is_moe_model = hasattr(cfg.model, 'n_experts') and cfg.model.n_experts > 1
          logger.info(f"-------------------------------- Mixture of expert : {is_moe_model} --------------------------------")
          if is_moe_model:
-            logger.info(f"Rank {rank} - MoE Config: Number of Experts = {model_config.n_experts}")
+            logger.info(f"Rank {rank} - MoE Config: Number of Experts = {cfg.model.n_experts}")
             if rank == 0 and writer:
-                writer.add_text('Model/Configuration', f"Number of Experts: {model_config.n_experts}", 0)
-                writer.add_text('Model/Configuration', f"Top_k: {getattr(model_config, 'top_k', 'N/A')}", 0)
-                writer.add_text('Model/Configuration', f"Aux Loss Enabled: {getattr(model_config, 'use_aux_loss', False)} (Weight: {getattr(model_config, 'aux_loss_weight', 0.0)})", 0)
-                writer.add_text('Model/Configuration', f"Router Z-Loss Enabled: {getattr(model_config, 'use_router_z_loss', False)} (Weight: {getattr(model_config, 'router_z_loss_weight', 0.0)})", 0)
+                writer.add_text('Model/Configuration', f"Number of Experts: {cfg.model.n_experts}", 0)
+                writer.add_text('Model/Configuration', f"Top_k: {getattr(cfg.model, 'top_k', 'N/A')}", 0)
+                writer.add_text('Model/Configuration', f"Aux Loss Enabled: {getattr(cfg.model, 'use_aux_loss', False)} (Weight: {getattr(cfg.model, 'aux_loss_weight', 0.0)})", 0)
+                writer.add_text('Model/Configuration', f"Router Z-Loss Enabled: {getattr(cfg.model, 'use_router_z_loss', False)} (Weight: {getattr(cfg.model, 'router_z_loss_weight', 0.0)})", 0)
 
 
 
-    model = GPT2LMNoBiasModel(model_config).to(device)
+    model = GPT2LMNoBiasModel(model_config, cfg.model).to(device)
     logger.info(f"Rank {rank} initialized model.")
 
     # DDP Wrapping

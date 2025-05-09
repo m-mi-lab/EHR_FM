@@ -17,7 +17,7 @@ bias: False            # lin layer bias, not gpt2 training bias
 
 
 # MOE config
-n_experts: 8
+n_experts: 4
 top_k: 2
 stride: 2 
 use_aux_loss: true

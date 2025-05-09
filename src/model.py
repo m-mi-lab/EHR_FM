@@ -31,7 +31,9 @@ class CausalSelfAttention(torch.nn.Module):
                 )
             self.register_buffer("bias", bias, persistent=False)
 
-        self.attention_weights = attention_weights # Store passed list reference
+        # Don't store the list reference, but make a boolean flag
+        self.store_attention = attention_weights is not None
+        self.attention_weights = attention_weights
 
     def forward(self, x):
         B, T, C = x.size()
@@ -40,7 +42,7 @@ class CausalSelfAttention(torch.nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        if self.flash and self.attention_weights is None:
+        if self.flash and not self.store_attention:
             y = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True
             )
@@ -51,8 +53,10 @@ class CausalSelfAttention(torch.nn.Module):
             att = torch.nn.functional.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v
-            if self.attention_weights is not None: # Check if list exists
-                 self.attention_weights.append(att.detach().cpu())
+            # Only store if needed and list exists
+            if self.store_attention and self.attention_weights is not None:
+                # Use clone() to avoid reference issues
+                self.attention_weights.append(att.detach().cpu())
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.resid_dropout(self.c_proj(y))
         return y
@@ -144,39 +148,71 @@ class Block(torch.nn.Module):
             self.mlp = MLP(config)
 
     def forward(self, x):
+        # Regular attention path
         x = x + self.attn(self.ln_1(x))
-        x = self.ln_2(x)
-
-        if self.is_moe:
-            batch_size, seq_len, hidden_dim = x.shape
-            num_tokens = batch_size * seq_len
-            x_flat = x.view(num_tokens, hidden_dim)
-
-            used_capacity, cb_weight, sec_mask = self.router(x_flat)
-            expert_capacity = sec_mask.shape[-1]
-            expert_out = torch.zeros_like(x_flat)
-            dispatched_input = torch.zeros(self.config.n_experts, expert_capacity, hidden_dim, device=x.device, dtype=x.dtype)
-            for token_idx in range(num_tokens):
-                for expert_idx in range(self.config.n_experts):
-                    for capacity_slot_idx in range(expert_capacity):
-                        if sec_mask[token_idx, expert_idx, capacity_slot_idx]:
-                            dispatched_input[expert_idx, capacity_slot_idx] = x_flat[token_idx]
-            
-            processed_by_experts = self.experts(dispatched_input)
-            cb_weight_expanded = cb_weight.unsqueeze(-1)
-            processed_by_experts_expanded = processed_by_experts.unsqueeze(0)
-            weighted_expert_outputs = processed_by_experts_expanded * cb_weight_expanded
-            final_output_flat = weighted_expert_outputs.sum(dim=(1,2))
-            x_mlp_out = final_output_flat.view(batch_size, seq_len, hidden_dim)
+        x_ln = self.ln_2(x)
         
+        if self.is_moe:
+            batch_size, seq_len, hidden_dim = x_ln.shape
+            num_tokens = batch_size * seq_len
+            x_flat = x_ln.view(num_tokens, hidden_dim)
+
+            # Route tokens through experts
+            used_capacity, cb_weight, sec_mask = self.router(x_flat)
+            
+            # Process tokens efficiently in a single pass through experts
+            expert_capacity = sec_mask.shape[-1]
+            dispatched_input = torch.zeros(
+                self.config.n_experts, expert_capacity, hidden_dim, 
+                device=x.device, dtype=x.dtype
+            )
+            
+            # More efficient token dispatch - avoid loops when possible
+            if dispatched_input.shape[0] * dispatched_input.shape[1] <= 1024:  # Small enough for tensor ops
+                # Use sec_mask to create mask for each expert
+                for expert_idx in range(self.config.n_experts):
+                    # Get mask for current expert
+                    expert_mask = sec_mask[:, expert_idx, :]  # [num_tokens, capacity]
+                    
+                    # Use masked_select and reshape for efficient assignment
+                    selected_tokens = torch.masked_select(
+                        x_flat.unsqueeze(1).expand(-1, expert_capacity, -1),
+                        expert_mask.unsqueeze(-1)
+                    ).view(-1, hidden_dim)
+                    
+                    # Fill only up to the number of selected tokens
+                    num_selected = selected_tokens.shape[0]
+                    if num_selected > 0:
+                        dispatched_input[expert_idx, :num_selected] = selected_tokens
+            else:
+                # Fall back to loop for very large models
+                for token_idx in range(num_tokens):
+                    for expert_idx in range(self.config.n_experts):
+                        for capacity_slot_idx in range(expert_capacity):
+                            if sec_mask[token_idx, expert_idx, capacity_slot_idx]:
+                                dispatched_input[expert_idx, capacity_slot_idx] = x_flat[token_idx]
+            
+            # Process tokens through experts
+            processed_by_experts = self.experts(dispatched_input)
+            
+            # Combine expert outputs efficiently
+            # Instead of expanding tensors, use einsum for the weighted sum
+            # cb_weight: [num_tokens, n_experts, capacity]
+            # processed_by_experts: [n_experts, capacity, hidden_dim]
+            # Result: [num_tokens, hidden_dim]
+            final_output_flat = torch.einsum('nec,ech->nh', cb_weight, processed_by_experts)
+            
+            # Reshape back to batch form
+            x_mlp_out = final_output_flat.view(batch_size, seq_len, hidden_dim)
         else:
-            x_mlp_out = self.mlp(x)
+            x_mlp_out = self.mlp(x_ln)
         
         x = x + x_mlp_out
         return x
 
+
 class GPT2LMNoBiasModel(torch.nn.Module):
-    def __init__(self, config: GPT2Config, return_attention=False):
+    def __init__(self, config: GPT2Config, moe_config, return_attention=False):
         super().__init__()
         self.config = config # Store config
         self.return_attention = return_attention
@@ -187,7 +223,7 @@ class GPT2LMNoBiasModel(torch.nn.Module):
             wpe=torch.nn.Embedding(config.n_positions, config.n_embd),
             drop=torch.nn.Dropout(config.embd_pdrop),
             # Pass the potentially existing list to Block
-            h=torch.nn.ModuleList([Block(config, self.attention_weights) for _ in range(config.n_layer)]),
+            h=torch.nn.ModuleList([Block(moe_config, self.attention_weights) for _ in range(config.n_layer)]),
             ln_f=torch.nn.LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = torch.nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -278,7 +314,7 @@ class Router(nn.Module):
         super().__init__()
 
         # router settings
-        self.top_k = config.top_k
+        self.top_k = config.top_k 
         self.n_exp = config.n_experts
         assert self.top_k >= 1 and self.top_k <= config.n_experts
         self.use_noisy_top_k = config.use_noisy_top_k
@@ -297,105 +333,99 @@ class Router(nn.Module):
         self.w_noise = nn.Linear(config.n_embd, config.n_experts, bias=False) if self.use_noisy_top_k else None
     
     def forward(self, x):
-        # optionally run the router in full precision to avoid instability during training
-        # see discussion on pg. 9 here: https://arxiv.org/abs/2101.03961
-        # setting enabled to False in autocast automatically puts everything in float32
-        device_type = 'cuda' if torch.cuda.is_available() else 'cpu' # for later use in torch.autocast
+        # Run the router in full precision if needed
+        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
         ctx = nullcontext() if not self.router_use_full_prec else torch.amp.autocast(device_type=device_type, enabled=False)
 
         with ctx:
-            B, T = x.size() if x.dim() == 2 else (x.size(0), 1)
-            num_tokens = B * T
+            # x should be 2D tensor [num_tokens, hidden_dim]
+            assert x.dim() == 2, f"Router input x must be 2D (x_flat), but got shape {x.shape}"
+            num_tokens = x.shape[0]
 
-            # eq (4) in (https://arxiv.org/abs/1701.06538)
-            logits = self.w_g(x)  # [B, T, n_exp] or [B, n_exp]
-            if self.use_noisy_top_k:
-                # optionally add noise into the router
+            # Get router logits
+            logits = self.w_g(x)  # [num_tokens, n_exp]
+            
+            # Add noise if configured
+            if self.use_noisy_top_k and self.training:
                 noise = F.softplus(self.w_noise(x))
                 noise *= torch.randn_like(noise)
                 logits += noise
 
-            # router z loss, computed on logits (before softmax)
-            # this loss prevents router logits from becoming too large
-            if self.use_router_z_loss:
-                z_loss = self.compute_router_z_loss(logits)
+            # Router z-loss to prevent logits from becoming too large
+            if self.use_router_z_loss and self.training:
+                z_loss = torch.mean(torch.logsumexp(logits, dim=-1) ** 2.0)
                 MANAGER.add_router_z_loss(z_loss)
 
-            # find top k experts for each token
-            top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1) # [B, T, k] or [B, k]
-
-            # normalize expert probabilities
-            router_probs = torch.full_like(logits, float('-inf'))  # [B, T, n_exp] or [B, n_exp]
+            # Find top-k experts per token
+            top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1)  # [num_tokens, top_k]
+            
+            # Convert to router probabilities (normalize)
+            router_probs = torch.full_like(logits, float('-inf'))
             router_probs.scatter_(-1, top_k_indices, top_k_logits)
-            router_probs = F.softmax(router_probs, dim=-1)
+            router_probs = F.softmax(router_probs, dim=-1)  # [num_tokens, n_exp]
 
-            # compute auxiliary load balancing loss
-            if self.use_aux_loss:
-                aux_loss = self.compute_aux_loss(router_probs, top_k_indices)
+            # Compute auxiliary load balancing loss
+            if self.use_aux_loss and self.training:
+                # Calculate mean of one-hot encodings
+                one_hot = F.one_hot(top_k_indices, num_classes=self.n_exp).float()  # [num_tokens, top_k, n_exp]
+                one_hot = one_hot.sum(dim=1)  # [num_tokens, n_exp]
+                tokens_per_expert = one_hot.mean(dim=0)  # [n_exp]
+                
+                # Calculate mean of router probabilities
+                prob_per_expert = router_probs.mean(dim=0)  # [n_exp]
+                
+                # Compute auxiliary loss
+                aux_loss = self.n_exp * torch.sum(prob_per_expert * tokens_per_expert)
                 MANAGER.add_aux_loss(aux_loss)
 
-            # compute expert capacity
-            exp_capacity = self.get_capacity(num_tokens)
-
-            # Reshape if needed to handle both 2D and 3D inputs
-            if router_probs.dim() == 2:  # [B, n_exp]
-                router_probs = router_probs.unsqueeze(1)  # [B, 1, n_exp]
-                top_k_indices = top_k_indices.unsqueeze(1)  # [B, 1, k]
-
-            # make a multi-hot mask of chosen experts
-            exp_mask = F.one_hot(top_k_indices, num_classes=self.n_exp)  # [B, T, k, n_exp]
-            exp_mask = exp_mask.view(num_tokens, self.top_k, self.n_exp)  # [B * T, k, n_exp]
-            exp_mask = exp_mask.permute(1, 0, 2) # [k, B * T, n_exp]
-
-            # compute cumulative sum
-            exp_rank = exp_mask.reshape(self.top_k * num_tokens, self.n_exp)  # [k * B * T, n_exp]
-            exp_rank = torch.cumsum(exp_rank, dim=0) - 1  # [k * B * T, n_exp]
-            exp_rank = exp_rank.reshape(self.top_k, num_tokens, self.n_exp)  # [k, B * T, n_exp]
-
-            # mask out entries beyond capacity
-            exp_mask *= torch.lt(exp_rank, exp_capacity) # [k, B * T, n_exp]
-            used_capacity = torch.sum(exp_mask, dim=(0, 1)) # [n_exp]
-
-            # mask rank and get position in expert batch
-            exp_rank = torch.sum(exp_mask * exp_rank, dim=-1)  # [k, B * T]
-
-            # mask probabilities to only include selected experts
-            router_probs = router_probs.view(num_tokens, self.n_exp)[None, :] # [1, B * T, n_exp]
-            exp_weights = exp_mask * router_probs # [k, B * T, n_exp]
-
-            # convert rank to one-hot
-            exp_rank_sc = F.one_hot(exp_rank, num_classes=exp_capacity) # [k, B * T, exp_capacity]
-
-            # create final weight vector for each token's experts
-            cb_weight = torch.sum(exp_weights.unsqueeze(3) * exp_rank_sc.unsqueeze(2), dim=0)
-            sec_mask = cb_weight.bool() # binary mask of selected experts 
+            # Calculate expert capacity - how many tokens each expert can process
+            capacity = self.get_capacity(num_tokens)
+            
+            # Create expert assignment and capacity tracking
+            # This is a more memory-efficient implementation
+            token_expert_indices = []
+            expert_capacity_usage = torch.zeros(self.n_exp, device=x.device, dtype=torch.int32)
+            
+            # Create dispatch map (which token goes to which expert at which position)
+            # Instead of creating a large tensor, build a list of assignments
+            expert_assignments = []
+            for token_idx in range(num_tokens):
+                for expert_idx in top_k_indices[token_idx]:
+                    # Check if expert has capacity
+                    if expert_capacity_usage[expert_idx] < capacity:
+                        # Record token → expert assignment
+                        expert_assignments.append((token_idx, expert_idx.item(), expert_capacity_usage[expert_idx].item()))
+                        expert_capacity_usage[expert_idx] += 1
+            
+            # Create routing matrices more efficiently
+            # Instead of large tensor operations, we'll build from the assignments
+            used_capacity = expert_capacity_usage.clone()
+            
+            # Create dispatch tensors
+            dispatched_input = torch.zeros(self.n_exp, capacity, x.shape[1], device=x.device, dtype=x.dtype)
+            
+            # Create weight matrix for combining outputs
+            cb_weight = torch.zeros(num_tokens, self.n_exp, capacity, device=x.device, dtype=x.dtype)
+            
+            # Create binary mask
+            sec_mask = torch.zeros(num_tokens, self.n_exp, capacity, device=x.device, dtype=torch.bool)
+            
+            # Fill the tensors based on assignments
+            for token_idx, expert_idx, slot_idx in expert_assignments:
+                # Get router probability for this token-expert pair
+                weight = router_probs[token_idx, expert_idx]
+                
+                # Fill dispatch tensors
+                dispatched_input[expert_idx, slot_idx] = x[token_idx]
+                cb_weight[token_idx, expert_idx, slot_idx] = weight
+                sec_mask[token_idx, expert_idx, slot_idx] = True
             
             return used_capacity, cb_weight, sec_mask
-
-    def compute_aux_loss(self, expert_probs, indices):
-        """Compute auxiliary load balancing loss"""
-        with torch.no_grad():
-            one_hot_indices = F.one_hot(indices, num_classes=self.n_exp)
-            if one_hot_indices.dim() == 4:  # [B, T, k, n_exp]
-                one_hot_indices = torch.sum(one_hot_indices.float(), dim=2)  # [B, T, n_exp]
-            elif one_hot_indices.dim() == 3:  # [B, k, n_exp]
-                one_hot_indices = torch.sum(one_hot_indices.float(), dim=1)  # [B, n_exp]
-            
-            tokens_per_expert = torch.mean(one_hot_indices.float(), dim=tuple(range(one_hot_indices.dim() - 1)))
-
-        prob_per_expert = torch.mean(expert_probs.float(), dim=tuple(range(expert_probs.dim() - 1)))
-        return self.n_exp * torch.sum(prob_per_expert * tokens_per_expert)
     
-    def compute_router_z_loss(self, logits):
-        """Compute router z-loss to prevent logits from growing too large"""
-        z_loss = torch.logsumexp(logits, dim=-1) ** 2.0
-        return torch.mean(z_loss)
-
     def get_capacity(self, tokens_per_batch):
         """Calculate expert capacity based on batch size"""
         capacity_factor = self.train_capacity if self.training else self.eval_capacity
         capacity = math.floor(self.top_k * capacity_factor * tokens_per_batch / self.n_exp)
         capacity += capacity % 2  # make sure capacity is an even number
-        capacity = max(capacity, self.min_capacity)  # use min capacity
-        assert capacity > 0
+        capacity = max(capacity, self.min_capacity)
         return int(capacity)

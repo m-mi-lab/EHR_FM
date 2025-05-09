@@ -21,8 +21,8 @@ lr_decay_iters: ${train.max_iters}
 min_lr: 6e-5
 
 # main
-batch_size: 4096 # individual_batch_size * gradient_accumulation_steps * num_gpus
-gradient_accumulation_steps: 16 
+batch_size: 128 # individual_batch_size * gradient_accumulation_steps * num_gpus --- 4096, 16 if 1 expert
+gradient_accumulation_steps: 8 
 dtype: 'float16'       # 'float32', 'bfloat16', or 'float16'
 num_workers: 0      # data loaders 
 ddp_find_unused_params: False # if ddp says unused params, set to True
