@@ -32,7 +32,8 @@ dependencies = [
     "MEDS_transforms~=0.1.0",
     "pyarrow",
     "numpy",
-    "pytorch-lightning"
+    "pytorch-lightning",
+    "tensorboard"
 ]
 
 [project.optional-dependencies]
