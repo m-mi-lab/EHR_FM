@@ -44,6 +44,12 @@ def estimate_loss(
         if split == "val":
             out.update({test_name: np.mean(v) for test_name, v in all_tokens_res.items()})
             out.update({test_name: compute_weighted_mean(v) for test_name, v in toi_res.items()})
+
+        if hasattr(model.config, 'n_experts') and model.config.n_experts > 1:
+            if output.aux_loss is not None:
+                losses['moe/aux_loss'] = output.aux_loss.item()
+            if output.router_z_loss is not None:
+                losses['moe/router_z_loss'] = output.router_z_loss.item()
     model.train()
     return out
 
