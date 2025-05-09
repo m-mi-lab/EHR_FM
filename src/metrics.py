@@ -94,36 +94,14 @@ def estimate_loss(
         
         # Calculate metrics for validation set
         if split == "val":
-            # Calculate mean accuracy for all tokens
-            for test_name, values in all_tokens_res.items():
-                if values:
-                    out[test_name] = sum(values) / len(values)
-                else:
-                    out[test_name] = float('nan')
-            
-            # Calculate weighted mean accuracy for special tokens
-            for test_name, values in toi_res.items():
-                if values:
-                    weights_sum = sum(x[1] for x in values) if isinstance(values[0], tuple) else len(values)
-                    if weights_sum > 0:
-                        if isinstance(values[0], tuple):
-                            out[test_name] = sum(x[0] * x[1] for x in values) / weights_sum
-                        else:
-                            out[test_name] = sum(values) / len(values)
-                    else:
-                        out[test_name] = float('nan')
-                else:
-                    out[test_name] = float('nan')
-    
-    # Check for MoE losses
-    if hasattr(model, 'config') and hasattr(model.config, 'n_experts') and model.config.n_experts > 1:
-        # Add MoE-specific losses if available
-        if hasattr(output, 'aux_loss') and output.aux_loss is not None:
-            out['moe/aux_loss'] = float(output.aux_loss.item())
-        if hasattr(output, 'router_z_loss') and output.router_z_loss is not None:
-            out['moe/router_z_loss'] = float(output.router_z_loss.item())
-    
-    # Set model back to training mode
+            out.update({test_name: np.mean(v) for test_name, v in all_tokens_res.items()})
+            out.update({test_name: compute_weighted_mean(v) for test_name, v in toi_res.items()})
+
+        if hasattr(model.config, 'n_experts') and model.config.n_experts > 1:
+            if output.aux_loss is not None:
+                losses['moe/aux_loss'] = output.aux_loss.item()
+            if output.router_z_loss is not None:
+                losses['moe/router_z_loss'] = output.router_z_loss.item()
     model.train()
     
     return out

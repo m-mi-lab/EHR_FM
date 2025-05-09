@@ -26,7 +26,6 @@ from model import GPT2LMNoBiasModel
 
 ModelOutput = namedtuple("ModelOutput", ["loss", "logits", "aux_loss", "router_z_loss"])
 
-
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
@@ -200,6 +199,17 @@ def train_worker(rank, world_size, cfg: DictConfig):
              bias=cfg.model.bias,
          )
          logger.info(f"Rank {rank} manually created model config.")
+         is_moe_model = hasattr(model_config, 'n_experts') and model_config.n_experts > 1
+
+
+
+         if is_moe_model:
+            logger.info(f"Rank {rank} - MoE Config: Number of Experts = {model_config.n_experts}")
+            if rank == 0 and writer:
+                writer.add_text('Model/Configuration', f"Number of Experts: {model_config.n_experts}", 0)
+                writer.add_text('Model/Configuration', f"Top_k: {getattr(model_config, 'top_k', 'N/A')}", 0)
+                writer.add_text('Model/Configuration', f"Aux Loss Enabled: {getattr(model_config, 'use_aux_loss', False)} (Weight: {getattr(model_config, 'aux_loss_weight', 0.0)})", 0)
+                writer.add_text('Model/Configuration', f"Router Z-Loss Enabled: {getattr(model_config, 'use_router_z_loss', False)} (Weight: {getattr(model_config, 'router_z_loss_weight', 0.0)})", 0)
 
          is_moe_model = hasattr(cfg.model, 'n_experts') and cfg.model.n_experts > 1
          logger.info(f"-------------------------------- Mixture of expert : {is_moe_model} --------------------------------")
@@ -384,8 +394,8 @@ def train_worker(rank, world_size, cfg: DictConfig):
                     writer.add_scalar('Meta/iter_time_ms', dt*1000, iter_num)
                     if is_moe_model:
                         if getattr(model.config, 'use_aux_loss', False):
-                                writer.add_scalar('MoE/aux_loss_raw', aux_loss, iter_num)
-                                writer.add_scalar('MoE/aux_loss_weighted', aux_loss * getattr(model.config, 'aux_loss_weight', 0.01), iter_num) # if contrib is also averaged
+                            writer.add_scalar('MoE/aux_loss_raw', aux_loss, iter_num)
+                            writer.add_scalar('MoE/aux_loss_weighted', aux_loss * getattr(model.config, 'aux_loss_weight', 0.01), iter_num) # if contrib is also averaged
                         if getattr(model.config, 'use_router_z_loss', False):
                             writer.add_scalar('MoE/router_z_loss_raw', router_z_loss, iter_num)
                             writer.add_scalar('MoE/router_z_loss_weighted', router_z_loss * getattr(model.config, 'router_z_loss_weight', 0.001), iter_num)
