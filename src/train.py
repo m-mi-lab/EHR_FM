@@ -26,12 +26,6 @@ from model import GPT2LMNoBiasModel
 ModelOutput = namedtuple("ModelOutput", ["loss", "logits"])
 
 
-
-
-
-
-
-
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'

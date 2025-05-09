@@ -108,13 +108,56 @@ class Block(torch.nn.Module):
         self.ln_1 = torch.nn.LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config, attention_weights=attention_weights)
         self.ln_2 = torch.nn.LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = MLP(config)
+
+        self.is_moe = hasattr(config, 'n_experts') and config.n_experts > 1
+        if self.is_moe:
+            self.router = Router(config)
+            self.experts = MLP(config)
+            self.config = config
+        else:
+            self.mlp = MLP(config)
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        x = self.ln_2(x)
+
+
+        if self.is_moe:
+            batch_size, seq_len, hidden_dim = x.shape
+            num_tokens = batch_size * seq_len
+            x_flat = x.view(num_tokens, hidden_dim)
+
+            used_capacity, cb_weight, sec_mask = self.router(x_flat)
+            expert_capacity = sec_mask.shape[-1]
+            expert_out = torch.zeros_like(x_flat)
+            dispatched_input = torch.zeros(self.config.n_experts, expert_capacity, hidden_dim, device=x.device, dtype=x.dtype)
+            for token_idx in range(num_tokens):
+                for expert_idx in range(self.config.n_experts):
+                    for capacity_slot_idx in range(expert_capacity):
+                        if sec_mask[token_idx, expert_idx, capacity_slot_idx]:
+                            dispatched_input[expert_idx, capacity_slot_idx] = x_flat[token_idx]
+            
+            processed_by_experts = self.experts(dispatched_input)
+            cb_weight_expanded = cb_weight.unsqueeze(-1)
+            processed_by_experts_expanded = processed_by_experts.unsqueeze(0)
+            weighted_expert_outputs = processed_by_experts_expanded * cb_weight_expanded
+            final_output_flat = weighted_expert_outputs.sum(dim=(1,2))
+            x_mlp_out = final_output_flat.view(batch_size, seq_len, hidden_dim)
+        
+        else:
+            x_mlp_out = self.mlp(x)
+        
+        x = x + x_mlp_out
         return x
-    
+
+
+
+
+
+
+
+
+
 
 class GPT2LMNoBiasModel(torch.nn.Module):
     def __init__(self, config: GPT2Config, return_attention=False):
