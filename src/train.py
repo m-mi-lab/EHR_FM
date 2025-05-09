@@ -202,6 +202,7 @@ def train_worker(rank, world_size, cfg: DictConfig):
          logger.info(f"Rank {rank} manually created model config.")
 
          is_moe_model = hasattr(model_config, 'n_experts') and model_config.n_experts > 1
+         logger.info(f"-------------------------------- Mixture of expert : {is_moe_model} --------------------------------")
          if is_moe_model:
             logger.info(f"Rank {rank} - MoE Config: Number of Experts = {model_config.n_experts}")
             if rank == 0 and writer:

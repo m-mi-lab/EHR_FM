@@ -216,62 +216,62 @@ class GPT2LMNoBiasModel(torch.nn.Module):
             n_params -= self.transformer.wpe.weight.numel()
         return n_params
 
-def forward(self, input_ids, labels=None) -> ModelOutput:
-    b, t = input_ids.size()
-    if t > self.config.n_positions: # Use stored config
-         raise ValueError(f"Cannot forward sequence of length {t}, block size is only {self.config.n_positions}")
+    def forward(self, input_ids, labels=None) -> ModelOutput:
+        b, t = input_ids.size()
+        if t > self.config.n_positions: # Use stored config
+            raise ValueError(f"Cannot forward sequence of length {t}, block size is only {self.config.n_positions}")
 
-    if self.return_attention and self.attention_weights is not None:
-        self.attention_weights.clear()
+        if self.return_attention and self.attention_weights is not None:
+            self.attention_weights.clear()
 
-    tok_emb = self.transformer.wte(input_ids)
-    pos_emb = self.transformer.wpe(self.pos[:t])
-    x = self.transformer.drop(tok_emb + pos_emb)
-    for block in self.transformer.h:
-        x = block(x)
-    x = self.transformer.ln_f(x)
+        tok_emb = self.transformer.wte(input_ids)
+        pos_emb = self.transformer.wpe(self.pos[:t])
+        x = self.transformer.drop(tok_emb + pos_emb)
+        for block in self.transformer.h:
+            x = block(x)
+        x = self.transformer.ln_f(x)
 
-    # Initialize aux losses to None
-    aux_loss = None
-    router_z_loss = None
+        # Initialize aux losses to None
+        aux_loss = None
+        router_z_loss = None
 
-    if labels is not None:
-        logits = self.lm_head(x)
-        # Ensure labels are long type and handle ignore_index if necessary
-        loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1).long(), ignore_index=-100)
+        if labels is not None:
+            logits = self.lm_head(x)
+            # Ensure labels are long type and handle ignore_index if necessary
+            loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1).long(), ignore_index=-100)
 
-        ## moe loss
-        is_moe_model = hasattr(self.config, 'n_experts') and getattr(self.config, 'n_experts', 0) > 1
-        if is_moe_model:
-            if getattr(self.config, 'use_aux_loss', False):
-                aux_loss = MANAGER.aggregate_aux_loss()
-                if aux_loss is not None:
-                    loss += getattr(self.config, 'aux_loss_weight', 0.01) * aux_loss
-                MANAGER.reset_aux_loss()
-            if getattr(self.config, 'use_router_z_loss', False):
-                router_z_loss = MANAGER.aggregate_router_z_loss()
-                if router_z_loss is not None:
-                    loss += getattr(self.config, 'router_z_loss_weight', 0.001) * router_z_loss
-                MANAGER.reset_router_z_loss()
-    else:
-        # inference-time mini-optimization: only forward the lm_head on the very last position
-        logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
-        loss = None
+            ## moe loss
+            is_moe_model = hasattr(self.config, 'n_experts') and getattr(self.config, 'n_experts', 0) > 1
+            if is_moe_model:
+                if getattr(self.config, 'use_aux_loss', False):
+                    aux_loss = MANAGER.aggregate_aux_loss()
+                    if aux_loss is not None:
+                        loss += getattr(self.config, 'aux_loss_weight', 0.01) * aux_loss
+                    MANAGER.reset_aux_loss()
+                if getattr(self.config, 'use_router_z_loss', False):
+                    router_z_loss = MANAGER.aggregate_router_z_loss()
+                    if router_z_loss is not None:
+                        loss += getattr(self.config, 'router_z_loss_weight', 0.001) * router_z_loss
+                    MANAGER.reset_router_z_loss()
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            loss = None
 
-    return ModelOutput(loss=loss, logits=logits, aux_loss=aux_loss, router_z_loss=router_z_loss)
+        return ModelOutput(loss=loss, logits=logits, aux_loss=aux_loss, router_z_loss=router_z_loss)
 
-    @torch.no_grad()
-    def get_next_token(self, x: torch.Tensor, return_probs: bool = False, top_k: int | None = None):
-        logits = self(x).logits # Call forward
-        logits = logits[:, -1, :] # Get the last token logits
-        if top_k is not None:
-            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-            logits[logits < v[:, [-1]]] = -float("Inf") # Apply top-k filtering
-        probs = torch.nn.functional.softmax(logits, dim=-1) # Get probabilities
-        next_token = torch.multinomial(probs, num_samples=1) # Sample next token
-        if return_probs:
-            return next_token, probs
-        return next_token
+        @torch.no_grad()
+        def get_next_token(self, x: torch.Tensor, return_probs: bool = False, top_k: int | None = None):
+            logits = self(x).logits # Call forward
+            logits = logits[:, -1, :] # Get the last token logits
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float("Inf") # Apply top-k filtering
+            probs = torch.nn.functional.softmax(logits, dim=-1) # Get probabilities
+            next_token = torch.multinomial(probs, num_samples=1) # Sample next token
+            if return_probs:
+                return next_token, probs
+            return next_token
 
 class Router(nn.Module):
     def __init__(self, config):
