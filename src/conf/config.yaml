@@ -1,6 +1,6 @@
 defaults:
   - train: default 
-  - model: gpt2_small         
+  - model: gpt2_small_moe        
   - data: mimic_data          
   - _self_                    
 

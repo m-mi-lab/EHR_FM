@@ -21,6 +21,7 @@ from src.tokenizer.constants import SpecialToken as ST
 from src.tokenizer.datasets import TimelineDataset
 from src.tokenizer.vocabulary import Vocabulary # Assuming Vocabulary can be loaded this way
 from src.metrics import estimate_loss
+from src.manager import MANAGER
 from model import GPT2LMNoBiasModel
 
 ModelOutput = namedtuple("ModelOutput", ["loss", "logits"])
@@ -332,6 +333,22 @@ def train_worker(rank, world_size, cfg: DictConfig):
                 loss = output.loss
                 loss = loss / cfg.train.gradient_accumulation_steps
                 total_loss_accum += loss.item()
+
+            model_config = model.module.config if world_size > 1 else model.config
+            is_moe_model = hasattr(model_config, 'n_experts') and model_config.n_experts > 1
+            if is_moe_model and model.training:
+             if getattr(model_config, 'use_aux_loss', False):
+                  aux_loss = MANAGER.aggregate_aux_loss()
+                  if aux_loss is not None: # Ensure loss was recorded
+                       loss += getattr(model_config, 'aux_loss_weight', 0.01) * aux_loss
+                  MANAGER.reset_aux_loss() # Reset for next accumulation cycle
+
+             if getattr(model_config, 'use_router_z_loss', False):
+                  router_z_loss = MANAGER.aggregate_router_z_loss()
+                  if router_z_loss is not None: # Ensure loss was recorded
+                       loss += getattr(model_config, 'router_z_loss_weight', 0.001) * router_z_loss
+                  MANAGER.reset_router_z_loss() # Reset for next accumulation cycle
+            total_loss_accum += loss.item()
             scaler.scale(loss).backward()
 
         if cfg.train.grad_clip > 0.0:
