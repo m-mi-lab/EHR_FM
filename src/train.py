@@ -16,76 +16,62 @@ from omegaconf import DictConfig, OmegaConf
 from transformers import GPT2Config
 from loguru import logger
 from torch.utils.tensorboard import SummaryWriter
+from contextlib import nullcontext
 
 from src.tokenizer.constants import SpecialToken as ST
 from src.tokenizer.datasets import TimelineDataset
-from src.tokenizer.vocabulary import Vocabulary # Assuming Vocabulary can be loaded this way
+from src.tokenizer.vocabulary import Vocabulary 
 from src.metrics import estimate_loss
-from src.manager import MANAGER
-from model import GPT2LMNoBiasModel
+from src.manager import MANAGER # MOEManager instance
+from model import GPT2LMNoBiasModel, ModelOutput # Import ModelOutput if not already
 
-ModelOutput = namedtuple("ModelOutput", ["loss", "logits", "aux_loss", "router_z_loss"])
+# ModelOutput is already defined in model.py, no need to redefine here if imported
+# ModelOutput = namedtuple("ModelOutput", ["loss", "logits", "aux_loss", "router_z_loss"])
+
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
-    # Initialize the process group
     backend = 'nccl' if torch.cuda.is_available() else 'gloo'
     dist.init_process_group(backend, rank=rank, world_size=world_size)
-    # Use logger instead of print
-    # logger.info is called inside train_worker after setup to ensure rank is known
-    # print(f"Rank {rank}/{world_size} initialized process group with backend '{backend}'.") # Keep print here as logger might not be configured yet
 
 
 def cleanup():
     dist.destroy_process_group()
-    # Use logger instead of print
     logger.info("Cleaned up process group.")
 
 def get_lr(it, cfg_training: DictConfig):
-    # 1) linear warmup for warmup_iters steps
     if it < cfg_training.warmup_iters:
         return cfg_training.lr * it / cfg_training.warmup_iters
-    # 2) if it > lr_decay_iters, return min learning rate
     if it > cfg_training.lr_decay_iters:
         return cfg_training.min_lr
-    # 3) in between, use cosine decay down to min learning rate
     decay_ratio = (it - cfg_training.warmup_iters) / (cfg_training.lr_decay_iters - cfg_training.warmup_iters)
     assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return cfg_training.min_lr + coeff * (cfg_training.lr - cfg_training.min_lr)
 
 def configure_optimizers(model: torch.nn.Module, weight_decay, learning_rate, betas, device_type):
-    param_dict = {pn: p for pn, p in model.named_parameters()} # start with all and filter later
-    param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-    # weight decay for >=2 dims
+    param_dict = {pn: p for pn, p in model.named_parameters() if p.requires_grad}
     decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
     nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
     optim_groups = [
         {'params': decay_params, 'weight_decay': weight_decay},
         {'params': nodecay_params, 'weight_decay': 0.0}
     ]
-    num_decay_params = sum(p.numel() for p in decay_params)
-    num_nodecay_params = sum(p.numel() for p in nodecay_params)
-    # Log using logger after it's configured
-    # print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-    # print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+    # num_decay_params = sum(p.numel() for p in decay_params) # Logged later
+    # num_nodecay_params = sum(p.numel() for p in nodecay_params) # Logged later
     fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
     use_fused = fused_available and device_type == 'cuda'
     extra_args = dict(fused=True) if use_fused else dict()
     optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-    # print(f"using fused AdamW: {use_fused}") # Log later
     return optimizer
 
-# --- Add make_infinite_loader back ---
 def make_infinite_loader(loader):
     while True:
         yield from iter(loader)
-# --- End Add ---
 
 
 def train_worker(rank, world_size, cfg: DictConfig):
-    # --- Configure Loguru ---
     logger.remove()
     log_format = (
         f"<green>{{time:YYYY-MM-DD HH:mm:ss}}</green> | "
@@ -99,21 +85,16 @@ def train_worker(rank, world_size, cfg: DictConfig):
         log_file_path = Path(cfg.train.out_dir) / "train.log"
         logger.add(log_file_path, rotation="10 MB", level="DEBUG")
         logger.info(f"Logging to file: {log_file_path}")
-    # --- End Loguru Config ---
 
     logger.info(f"Running DDP training worker on rank {rank}.")
-    setup(rank, world_size) # Initialize DDP
-    # Now log the DDP setup message
+    setup(rank, world_size)
     logger.info(f"Rank {rank}/{world_size} initialized process group.")
 
-
-    # --- Initialize Tensorboard Writer (only rank 0) ---
     writer = None
     if rank == 0:
         tb_log_dir = Path(cfg.train.out_dir) / "tensorboard_logs"
         writer = SummaryWriter(log_dir=str(tb_log_dir))
         logger.info(f"Tensorboard logs will be saved to: {tb_log_dir}")
-    # --- End Tensorboard Init ---
 
     if torch.cuda.is_available():
         torch.cuda.set_device(rank)
@@ -122,31 +103,29 @@ def train_worker(rank, world_size, cfg: DictConfig):
         device = torch.device("cpu")
     logger.info(f"Rank {rank} using device: {device}")
 
-    # Load vocab
     try:
         vocab_dir = Path(cfg.data.tokenized_dir)
         vocab = Vocabulary.from_path(vocab_dir)
         vocab_size = (len(vocab) // 64 + 1) * 64 if len(vocab) % 64 != 0 else len(vocab)
         logger.info(f"Rank {rank} loaded vocabulary with size {len(vocab)} (padded: {vocab_size}).")
-        tokens_of_interest = {stoken: vocab.encode(stoken) for stoken in [ST.DEATH, ST.ADMISSION, ST.DISCHARGE] if stoken in vocab.stoi}
+        tokens_of_interest = {stoken.value: vocab.encode(stoken.value) for stoken in [ST.DEATH, ST.ADMISSION, ST.DISCHARGE] if stoken.value in vocab.stoi}
         logger.info(f"Rank {rank} Tokens of Interest: {tokens_of_interest}")
     except Exception as e:
         logger.exception(f"Rank {rank} FAILED to load vocabulary from {cfg.data.tokenized_dir}: {e}")
         cleanup()
         return
 
-    # Load dataset
     try:
         full_dataset = TimelineDataset(
             input_dir=cfg.data.tokenized_dir,
-            n_positions=cfg.model.n_positions,
+            n_positions=cfg.model.n_positions, # This should be base n_positions
             is_encoder_decoder=False,
         )
         logger.info(f"Rank {rank} loaded full dataset with {len(full_dataset)} samples.")
 
         val_split_count = int(cfg.data.val_split_fraction * len(full_dataset))
         train_split_count = len(full_dataset) - val_split_count
-        generator = torch.Generator().manual_seed(42)
+        generator = torch.Generator().manual_seed(cfg.seed) # Use main seed
         train_indices, val_indices = torch.utils.data.random_split(
             range(len(full_dataset)), [train_split_count, val_split_count], generator=generator
         )
@@ -154,8 +133,8 @@ def train_worker(rank, world_size, cfg: DictConfig):
         val_dataset = Subset(full_dataset, val_indices)
         logger.info(f"Rank {rank} - Train size: {len(train_dataset)}, Val size: {len(val_dataset)}")
 
-        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
-        val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=cfg.seed)
+        val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False, seed=cfg.seed)
 
         batch_size_per_gpu = cfg.train.batch_size // (world_size * cfg.train.gradient_accumulation_steps)
         if batch_size_per_gpu < 1:
@@ -163,70 +142,61 @@ def train_worker(rank, world_size, cfg: DictConfig):
              batch_size_per_gpu = 1
         logger.info(f"Rank {rank} - Batch size per GPU: {batch_size_per_gpu}")
 
-
         train_dataloader = DataLoader(train_dataset, batch_size=batch_size_per_gpu, sampler=train_sampler, num_workers=cfg.train.num_workers, pin_memory=True)
         val_dataloader = DataLoader(val_dataset, batch_size=batch_size_per_gpu, sampler=val_sampler, num_workers=cfg.train.num_workers, pin_memory=True)
-
-        # --- Use make_infinite_loader ---
         train_dataloader = make_infinite_loader(train_dataloader)
         val_dataloader = make_infinite_loader(val_dataloader)
-        # --- End Use ---
         logger.info(f"Rank {rank} created DataLoaders.")
-
     except Exception as e:
         logger.exception(f"Rank {rank} FAILED during data loading: {e}")
-        import traceback
-        traceback.print_exc()
         cleanup()
         return
 
-
     # Model setup
-    if "_target_" in cfg.model:
-         model_config = hydra.utils.instantiate(cfg.model, vocab_size=vocab_size, _recursive_=False)
-         logger.info(f"Rank {rank} instantiated model config from target: {cfg.model._target_}")
-    else:
-         model_config = GPT2Config(
-             vocab_size=vocab_size,
-             n_positions=cfg.model.n_positions,
-             n_embd=cfg.model.n_embd,
-             n_layer=cfg.model.n_layer,
-             n_head=cfg.model.n_head,
-             activation_function=cfg.model.activation_function,
-             resid_pdrop=cfg.model.resid_pdrop,
-             embd_pdrop=cfg.model.embd_pdrop,
-             attn_pdrop=cfg.model.attn_pdrop,
-             bias=cfg.model.bias,
-         )
-         logger.info(f"Rank {rank} manually created model config.")
-         is_moe_model = hasattr(model_config, 'n_experts') and model_config.n_experts > 1
+    # Base GPT2Config
+    base_model_config = GPT2Config(
+         vocab_size=vocab_size,
+         n_positions=cfg.model.n_positions,
+         n_embd=cfg.model.n_embd,
+         n_layer=cfg.model.n_layer,
+         n_head=cfg.model.n_head,
+         activation_function=cfg.model.activation_function,
+         resid_pdrop=cfg.model.resid_pdrop,
+         embd_pdrop=cfg.model.embd_pdrop,
+         attn_pdrop=cfg.model.attn_pdrop,
+         bias=cfg.model.bias,
+         # n_inner can be part of cfg.model and then used by MLP if needed
+         n_inner=getattr(cfg.model, 'n_inner', None), # Pass n_inner if specified in moe_config
+    )
+    logger.info(f"Rank {rank} created base GPT2 model config.")
 
-
-
-         if is_moe_model:
-            logger.info(f"Rank {rank} - MoE Config: Number of Experts = {model_config.n_experts}")
-            if rank == 0 and writer:
-                writer.add_text('Model/Configuration', f"Number of Experts: {model_config.n_experts}", 0)
-                writer.add_text('Model/Configuration', f"Top_k: {getattr(model_config, 'top_k', 'N/A')}", 0)
-                writer.add_text('Model/Configuration', f"Aux Loss Enabled: {getattr(model_config, 'use_aux_loss', False)} (Weight: {getattr(model_config, 'aux_loss_weight', 0.0)})", 0)
-                writer.add_text('Model/Configuration', f"Router Z-Loss Enabled: {getattr(model_config, 'use_router_z_loss', False)} (Weight: {getattr(model_config, 'router_z_loss_weight', 0.0)})", 0)
-
-         is_moe_model = hasattr(cfg.model, 'n_experts') and cfg.model.n_experts > 1
-         logger.info(f"-------------------------------- Mixture of expert : {is_moe_model} --------------------------------")
-         if is_moe_model:
-            logger.info(f"Rank {rank} - MoE Config: Number of Experts = {cfg.model.n_experts}")
-            if rank == 0 and writer:
-                writer.add_text('Model/Configuration', f"Number of Experts: {cfg.model.n_experts}", 0)
-                writer.add_text('Model/Configuration', f"Top_k: {getattr(cfg.model, 'top_k', 'N/A')}", 0)
-                writer.add_text('Model/Configuration', f"Aux Loss Enabled: {getattr(cfg.model, 'use_aux_loss', False)} (Weight: {getattr(cfg.model, 'aux_loss_weight', 0.0)})", 0)
-                writer.add_text('Model/Configuration', f"Router Z-Loss Enabled: {getattr(cfg.model, 'use_router_z_loss', False)} (Weight: {getattr(cfg.model, 'router_z_loss_weight', 0.0)})", 0)
-
-
-
-    model = GPT2LMNoBiasModel(model_config, cfg.model).to(device)
+    # The moe_hydra_config (cfg.model) will be passed directly and contains MoE specific params
+    # It should also contain any parameters that Block/MLP/Router might need if they differ from base_config
+    # e.g., if n_embd for MoE layers were different, it should be in cfg.model.
+    # For now, assume n_embd, n_head, bias, activation_function, resid_pdrop are consistent from base_model_config
+    # and cfg.model mainly provides n_experts, top_k, aux_loss params etc.
+    # The model.py's GPT2LMNoBiasModel will use base_model_config for transformer shell and moe_hydra_config for MoE parts.
+    
+    model = GPT2LMNoBiasModel(base_gpt_config=base_model_config, moe_hydra_config=cfg.model).to(device)
     logger.info(f"Rank {rank} initialized model.")
 
-    # DDP Wrapping
+    is_moe_model = hasattr(cfg.model, 'n_experts') and cfg.model.n_experts > 1 # Check the input Hydra config
+    if rank == 0 and is_moe_model:
+        logger.info("-----------------------------------------------------------------------------------------------")
+        logger.info(f"MoE Model Configured: Number of Experts = {cfg.model.n_experts}, Top_k = {cfg.model.top_k}")
+        if writer:
+            writer.add_text('Model/Type', "Mixture of Experts", 0)
+            writer.add_text('Model/NumExperts', str(cfg.model.n_experts), 0)
+            writer.add_text('Model/TopK', str(cfg.model.top_k), 0)
+            writer.add_text('Model/AuxLossEnabled', f"{getattr(cfg.model, 'use_aux_loss', False)} (Weight: {getattr(cfg.model, 'aux_loss_weight', 0.0)})", 0)
+            writer.add_text('Model/RouterZLossEnabled', f"{getattr(cfg.model, 'use_router_z_loss', False)} (Weight: {getattr(cfg.model, 'router_z_loss_weight', 0.0)})", 0)
+    elif rank == 0:
+        logger.info("-----------------------------------------------------------------------------------------------")
+        logger.info("Standard GPT Model Configured.")
+        if writer:
+            writer.add_text('Model/Type', "Standard GPT", 0)
+
+
     if world_size > 1:
         model = DDP(model, device_ids=[rank], find_unused_parameters=cfg.train.ddp_find_unused_params)
         logger.info(f"Rank {rank} wrapped model with DDP.")
@@ -234,22 +204,19 @@ def train_worker(rank, world_size, cfg: DictConfig):
     else:
         raw_model = model
 
-    # Optimizer and Scaler
     scaler = torch.amp.GradScaler(enabled=(cfg.train.dtype == 'float16'))
     optimizer = configure_optimizers(raw_model, cfg.train.weight_decay, cfg.train.lr, (cfg.train.beta1, cfg.train.beta2), device.type)
     logger.info(f"Rank {rank} configured optimizer (Weight Decay: {cfg.train.weight_decay}, LR: {cfg.train.lr}) and scaler (enabled: {scaler.is_enabled()}).")
-    # Log optimizer details
-    logger.info(f"Optimizer details: Num decayed params: {sum(p.numel() for group in optimizer.param_groups if group['weight_decay'] > 0 for p in group['params'])}, Num non-decayed params: {sum(p.numel() for group in optimizer.param_groups if group['weight_decay'] == 0 for p in group['params'])}")
-    logger.info(f"Using fused AdamW: {'fused' in optimizer.param_groups[0] and optimizer.param_groups[0]['fused']}")
+    if rank == 0: # Log optimizer details only once
+        logger.info(f"Optimizer details: Num decayed params: {sum(p.numel() for group in optimizer.param_groups if group['weight_decay'] > 0 for p in group['params'])}, Num non-decayed params: {sum(p.numel() for group in optimizer.param_groups if group['weight_decay'] == 0 for p in group['params'])}")
+        logger.info(f"Using fused AdamW: {'fused' in optimizer.param_groups[0] and optimizer.param_groups[0]['fused'] if optimizer.param_groups else 'N/A'}")
 
 
-    # Autocast context
     ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[cfg.train.dtype]
-    autocast_enabled = (cfg.train.dtype != 'float32')
+    autocast_enabled = (cfg.train.dtype != 'float32') and (device.type == 'cuda') # Autocast only for CUDA
     ctx = torch.amp.autocast(device_type=device.type, dtype=ptdtype, enabled=autocast_enabled)
     logger.info(f"Rank {rank} using autocast with dtype: {ptdtype} (enabled: {autocast_enabled})")
 
-    # Checkpoint loading
     iter_num = 0
     best_val_loss = 1e9
     if cfg.train.resume_from_checkpoint:
@@ -259,11 +226,22 @@ def train_worker(rank, world_size, cfg: DictConfig):
             map_location = {'cuda:%d' % 0: 'cuda:%d' % rank} if torch.cuda.is_available() else device
             checkpoint = torch.load(ckpt_path, map_location=map_location)
             try:
-                raw_model.load_state_dict(checkpoint['model'])
+                # raw_model.load_state_dict(checkpoint['model']) # This might fail if config changed slightly
+                # Load state dict more robustly
+                model_state_dict = checkpoint['model']
+                # Filter out unexpected keys (e.g. if model structure changed)
+                current_model_keys = set(raw_model.state_dict().keys())
+                filtered_state_dict = {k: v for k, v in model_state_dict.items() if k in current_model_keys}
+                missing_keys, unexpected_keys = raw_model.load_state_dict(filtered_state_dict, strict=False)
+                if missing_keys:
+                    logger.warning(f"Rank {rank} - Missing keys when loading model state: {missing_keys}")
+                if unexpected_keys:
+                    logger.warning(f"Rank {rank} - Unexpected keys in checkpoint model state: {unexpected_keys}")
+
                 optimizer.load_state_dict(checkpoint['optimizer'])
                 iter_num = checkpoint['iter_num']
                 best_val_loss = checkpoint['best_val_loss']
-                if 'scaler' in checkpoint:
+                if 'scaler' in checkpoint and scaler is not None:
                     scaler.load_state_dict(checkpoint['scaler'])
                 logger.info(f"Rank {rank} successfully resumed from iteration {iter_num} with best_val_loss {best_val_loss:.4f}")
             except Exception as e:
@@ -277,59 +255,63 @@ def train_worker(rank, world_size, cfg: DictConfig):
     def get_batch_worker(split):
         loader = train_dataloader if split == "train" else val_dataloader
         x, y = next(loader)
-        y = y.to(device, non_blocking=True)
-        if isinstance(x, (list, tuple)):
+        # y labels are already Long by default from CrossEntropy, but ensure targets are long for cross_entropy
+        y = y.to(device, non_blocking=True).long() 
+        if isinstance(x, (list, tuple)): # Should not happen with TimelineDataset current __getitem__
             return tuple(t.to(device, non_blocking=True) for t in x), y
         return x.to(device, non_blocking=True), y
 
     logger.info(f"Rank {rank} starting training loop from iteration {iter_num}...")
     t0 = time.time()
-    local_iter_num = 0 # Tracks iterations within this run
+    local_iter_num = 0 
 
-    # --- Training Loop ---
     while iter_num < cfg.train.max_iters:
         lr = get_lr(iter_num, cfg.train) if cfg.train.decay_lr else cfg.train.lr
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
 
-        # Evaluation and Checkpointing (Rank 0 Only)
         if iter_num % cfg.train.eval_interval == 0 and cfg.train.eval_iters > 0:
             if rank == 0:
                 logger.info(f"Evaluating at step {iter_num}...")
-                # Ensure raw_model is used if DDP is active
-                eval_model = raw_model if world_size > 1 else model
-                losses = estimate_loss(eval_model, ctx, get_batch_worker, cfg.train.eval_iters, tokens_of_interest)
-                val_loss = losses.get('loss/val', float('nan'))
+                eval_model = raw_model
+                # Pass the moe_hydra_config to estimate_loss if it needs MoE specific details
+                losses = estimate_loss(eval_model, ctx, get_batch_worker, cfg.train.eval_iters, tokens_of_interest, cfg.model)
+                val_loss = losses.get('loss/val', float('nan')) # main validation loss
                 logger.info(f"--- Eval Results (iter {iter_num}) ---")
                 if writer:
-                    for k, v in losses.items():
-                        # Group metrics by split (train/val) and then metric type (loss, acc_top)
+                    for k, v_val in losses.items():
                         parts = k.split('/')
-                        if len(parts) >= 2:
-                             tag = f"{parts[-1].capitalize()}/{'/'.join(parts[:-1])}" # e.g., Val/loss, Val/acc_top/all/1023/k=1
-                        else:
-                             tag = f"Misc/{k}"
-                        writer.add_scalar(tag, v, iter_num)
-                        logger.info(f"{k}: {v:.4f}")
+                        tag_prefix = parts[-1].capitalize() if len(parts) > 1 else "Misc"
+                        tag_suffix = '/'.join(parts[:-1]) if len(parts) > 1 else k
+                        writer.add_scalar(f"{tag_prefix}/{tag_suffix}", v_val, iter_num)
+                        logger.info(f"{k}: {v_val:.4f}")
                     writer.flush()
                 else:
-                     for k, v in losses.items():
-                          logger.info(f"{k}: {v:.4f}")
+                     for k, v_val in losses.items():
+                          logger.info(f"{k}: {v_val:.4f}")
                 logger.info(f"--------------------")
 
                 if cfg.train.save_checkpoints and not math.isnan(val_loss) and val_loss < best_val_loss:
                     best_val_loss = val_loss
                     if writer:
-                        writer.add_scalar('Loss/best_val', best_val_loss, iter_num) # Simplified tag
+                        writer.add_scalar('Loss/best_val_main', best_val_loss, iter_num)
+                    
+                    # # Get config from raw_model (GPT2LMNoBiasModel instance)
+                    # # It stores base_config and moe_config
+                    # save_model_config = {
+                    #     'base_config': OmegaConf.to_container(raw_model.base_config, resolve=True), # GPT2Config to dict
+                    #     'moe_config': OmegaConf.to_container(raw_model.moe_config, resolve=True) # Hydra config for MoE
+                    # }
+
                     checkpoint = {
                         'iter_num': iter_num,
                         'model': raw_model.state_dict(),
                         'optimizer': optimizer.state_dict(),
-                        'scaler': scaler.state_dict(),
+                        'scaler': scaler.state_dict() if scaler is not None else None,
                         'best_val_loss': best_val_loss,
-                        'model_config': raw_model.config, # Use config from potentially wrapped model
-                        'vocab': vocab.stoi,
-                        'hydra_config': OmegaConf.to_container(cfg, resolve=True)
+                        'model_configs': cfg.model, # Store both configs
+                        'vocab_stoi': vocab.stoi, # Save vocab string-to-int
+                        'hydra_config_full': OmegaConf.to_container(cfg, resolve=True) # Full training hydra config
                     }
                     ckpt_path = Path(cfg.train.out_dir) / "best_model.pt"
                     logger.info(f"Saving checkpoint to {ckpt_path} (Val Loss: {best_val_loss:.4f})")
@@ -338,67 +320,73 @@ def train_worker(rank, world_size, cfg: DictConfig):
                     recent_ckpt_path = Path(cfg.train.out_dir) / f"ckpt_{iter_num}.pt"
                     logger.info(f"Saving recent checkpoint to {recent_ckpt_path}")
                     torch.save(checkpoint, recent_ckpt_path)
-
             if world_size > 1:
                 dist.barrier()
 
-        # Training Step (All Ranks)
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        total_loss_accum = 0.0
+        
+        accumulated_loss_value = 0.0 # For logging the accumulated main loss
+        accumulated_raw_aux_loss = None
+        accumulated_raw_router_z_loss = None
+
 
         for micro_step in range(cfg.train.gradient_accumulation_steps):
-            # DDP handles gradient sync automatically in .backward() when no_sync isn't used
-            with ctx:
-                X, Y = get_batch_worker("train")
-                output = model(X, Y)
-                loss = output.loss
-                loss = loss / cfg.train.gradient_accumulation_steps
-                total_loss_accum += loss.item()
+            # DDP sync for last micro_step or if not using DDP
+            sync_context = model.no_sync if (world_size > 1 and (micro_step < cfg.train.gradient_accumulation_steps - 1)) else nullcontext
+            with sync_context():
+                with ctx:
+                    X, Y = get_batch_worker("train")
+                    output: ModelOutput = model(X, Y) # output is ModelOutput
+                    
+                    # The loss from model output already includes weighted auxiliary losses
+                    loss = output.loss 
+                    loss = loss / cfg.train.gradient_accumulation_steps # Normalize loss for accumulation
 
-            model_config = model.module.config if world_size > 1 else model.config
-            is_moe_model = hasattr(model_config, 'n_experts') and model_config.n_experts > 1
-            if is_moe_model and model.training:
-             if getattr(model_config, 'use_aux_loss', False):
-                  aux_loss = MANAGER.aggregate_aux_loss()
-                  if aux_loss is not None: # Ensure loss was recorded
-                       loss += getattr(model_config, 'aux_loss_weight', 0.01) * aux_loss
-                  MANAGER.reset_aux_loss() # Reset for next accumulation cycle
+                accumulated_loss_value += loss.item() * cfg.train.gradient_accumulation_steps # De-normalize for logging sum
+                
+                # Accumulate raw aux losses for logging (average over micro_steps)
+                if output.aux_loss is not None:
+                    if accumulated_raw_aux_loss is None: accumulated_raw_aux_loss = 0.0
+                    accumulated_raw_aux_loss += output.aux_loss.item()
+                if output.router_z_loss is not None:
+                    if accumulated_raw_router_z_loss is None: accumulated_raw_router_z_loss = 0.0
+                    accumulated_raw_router_z_loss += output.router_z_loss.item()
 
-             if getattr(model_config, 'use_router_z_loss', False):
-                  router_z_loss = MANAGER.aggregate_router_z_loss()
-                  if router_z_loss is not None: # Ensure loss was recorded
-                       loss += getattr(model_config, 'router_z_loss_weight', 0.001) * router_z_loss
-                  MANAGER.reset_router_z_loss() # Reset for next accumulation cycle
-            total_loss_accum += loss.item()
-            scaler.scale(loss).backward()
+                scaler.scale(loss).backward()
 
         if cfg.train.grad_clip > 0.0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
+        
         scaler.step(optimizer)
         scaler.update()
 
-        # Logging (Rank 0 Only)
         if rank == 0:
             t1 = time.time()
             dt = t1 - t0
             t0 = t1
             if iter_num % cfg.train.log_interval == 0:
-                lossf = total_loss_accum
-                logger.info(f"iter {iter_num}: train_loss {lossf:.4f}, time {dt*1000:.2f}ms, lr {lr:.6f}")
+                # Log the average loss over accumulation steps
+                avg_loss_this_step = accumulated_loss_value / cfg.train.gradient_accumulation_steps
+                logger.info(f"iter {iter_num}: train_loss {avg_loss_this_step:.4f}, time {dt*1000:.2f}ms, lr {lr:.6f}")
                 if writer:
-                    writer.add_scalar('Loss/train', lossf, iter_num)
+                    writer.add_scalar('Loss/train_main', avg_loss_this_step, iter_num)
                     writer.add_scalar('Meta/learning_rate', lr, iter_num)
-                    # Optionally log timing
                     writer.add_scalar('Meta/iter_time_ms', dt*1000, iter_num)
-                    if is_moe_model:
-                        if getattr(model.config, 'use_aux_loss', False):
-                            writer.add_scalar('MoE/aux_loss_raw', aux_loss, iter_num)
-                            writer.add_scalar('MoE/aux_loss_weighted', aux_loss * getattr(model.config, 'aux_loss_weight', 0.01), iter_num) # if contrib is also averaged
-                        if getattr(model.config, 'use_router_z_loss', False):
-                            writer.add_scalar('MoE/router_z_loss_raw', router_z_loss, iter_num)
-                            writer.add_scalar('MoE/router_z_loss_weighted', router_z_loss * getattr(model.config, 'router_z_loss_weight', 0.001), iter_num)
+                    
+                    if is_moe_model: # Log raw (unweighted) aux losses averaged over micro_steps
+                        if accumulated_raw_aux_loss is not None:
+                            avg_raw_aux_loss = accumulated_raw_aux_loss / cfg.train.gradient_accumulation_steps
+                            writer.add_scalar('MoE/aux_loss_raw_train', avg_raw_aux_loss, iter_num)
+                            # Log weighted contribution as well for verification
+                            weighted_aux = avg_raw_aux_loss * getattr(cfg.model, 'aux_loss_weight', 0.01)
+                            writer.add_scalar('MoE/aux_loss_weighted_train', weighted_aux, iter_num)
+                        if accumulated_raw_router_z_loss is not None:
+                            avg_raw_router_z_loss = accumulated_raw_router_z_loss / cfg.train.gradient_accumulation_steps
+                            writer.add_scalar('MoE/router_z_loss_raw_train', avg_raw_router_z_loss, iter_num)
+                            weighted_rz = avg_raw_router_z_loss * getattr(cfg.model, 'router_z_loss_weight', 0.001)
+                            writer.add_scalar('MoE/router_z_loss_weighted_train', weighted_rz, iter_num)
                     writer.flush()
 
         iter_num += 1
@@ -407,19 +395,21 @@ def train_worker(rank, world_size, cfg: DictConfig):
         if iter_num >= cfg.train.max_iters:
              logger.info(f"Rank {rank} reached max iterations ({cfg.train.max_iters}).")
              break
-    # --- End Training Loop ---
 
-    # Final Checkpoint Saving (Rank 0 Only)
     if rank == 0 and cfg.train.save_checkpoints:
+        # save_model_config = {
+        #     'base_config': OmegaConf.to_container(raw_model.base_config.to_dict_recursive(), resolve=True),
+        #     'moe_config': OmegaConf.to_container(raw_model.moe_config, resolve=True)
+        # }
         final_checkpoint = {
             'iter_num': iter_num,
             'model': raw_model.state_dict(),
             'optimizer': optimizer.state_dict(),
-            'scaler': scaler.state_dict(),
+            'scaler': scaler.state_dict() if scaler is not None else None,
             'best_val_loss': best_val_loss,
-            'model_config': raw_model.config, # Use config from potentially wrapped model
-            'vocab': vocab.stoi,
-            'hydra_config': OmegaConf.to_container(cfg, resolve=True)
+            'model_configs': cfg.model,
+            'vocab_stoi': vocab.stoi,
+            'hydra_config_full': OmegaConf.to_container(cfg, resolve=True)
         }
         final_ckpt_path = Path(cfg.train.out_dir) / "final_model.pt"
         logger.info(f"Saving final model checkpoint to {final_ckpt_path}")
@@ -434,46 +424,46 @@ def train_worker(rank, world_size, cfg: DictConfig):
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main_hydra(cfg: DictConfig):
-
-    # --- Configure Loguru for main process ---
     logger.remove()
     logger.add(lambda msg: print(msg, end=""), colorize=True, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>", level="INFO")
-    # --- End Loguru Config ---
 
     logger.info("--- Hydra Configuration ---")
-    logger.info(f"\n{OmegaConf.to_yaml(cfg)}")
+    # Print a sanitized version if there are secrets, otherwise full
+    logger.info(f"\n{OmegaConf.to_yaml(cfg, resolve=True)}") # Resolve interpolations for clarity
     logger.info("--------------------------")
 
-
-    curr_dir = os.getcwd()
+    curr_dir = os.getcwd() # Hydra sets current working directory to output subdir
     logger.info(f"Hydra output directory: {curr_dir}")
-    OmegaConf.set_struct(cfg, False)
+    
+    # Allow modifications to cfg now, like setting out_dir
+    OmegaConf.set_struct(cfg, False) 
     cfg.train.out_dir = curr_dir
-    OmegaConf.set_struct(cfg, True)
+    OmegaConf.set_struct(cfg, True) # Re-lock if needed, though often not necessary after this point
 
-
-    world_size = cfg.get("world_size", torch.cuda.device_count())
+    world_size = cfg.get("world_size", 1) # Default to 1 if not specified
+    if world_size == 'auto': # 'auto' or similar to detect GPUs
+        world_size = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    elif isinstance(world_size, str) and world_size.isdigit():
+        world_size = int(world_size)
+    
     available_gpus = torch.cuda.device_count()
 
-    if world_size > available_gpus:
+    if world_size > available_gpus and available_gpus > 0 : # Only warn if GPUs are available but fewer than requested
          logger.warning(f"Requested world_size {world_size} > available GPUs {available_gpus}. Setting to {available_gpus}.")
          world_size = available_gpus
-
-    # Adjust logic for spawning processes
+    elif available_gpus == 0 and world_size > 1:
+        logger.warning(f"No GPUs available. Requested world_size {world_size} is not possible for DDP. Running on CPU with world_size=1.")
+        world_size = 1
+    
     if world_size <= 1:
         if available_gpus == 0:
-            logger.info("No GPUs detected. Running on CPU.")
-            train_worker(0, 1, cfg) # Run directly on CPU (rank 0, world_size 1)
+            logger.info("No GPUs detected. Running on CPU (world_size=1, rank=0).")
         else:
-            logger.info("Running on a single GPU.")
-            train_worker(0, 1, cfg) # Run directly on GPU 0 (rank 0, world_size 1)
-            # # Alternatively, spawn 1 process if strict DDP setup is desired even for 1 GPU
-            # logger.info("Running on a single GPU. Spawning one process.")
-            # mp.spawn(train_worker, args=(1, cfg), nprocs=1, join=True)
+            logger.info("Running on a single GPU or world_size set to 1 (world_size=1, rank=0).")
+        train_worker(0, 1, cfg)
     else:
          logger.info(f"Spawning {world_size} processes for DDP training.")
          mp.spawn(train_worker, args=(world_size, cfg), nprocs=world_size, join=True)
-
 
     logger.info("Main process finished.")
 

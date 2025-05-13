@@ -1,0 +1,20 @@
+# for different models
+# _target_: transformers.GPT2Config
+
+# vocab_size is determined during runtime
+n_positions: 2048      
+n_embd: 64            
+n_layer: 1            
+n_head: 4              
+# n_inner: null        # 4*n_embd if null
+activation_function: "gelu" 
+
+# Dropout
+resid_pdrop: 0.0
+embd_pdrop: 0.0
+attn_pdrop: 0.0
+bias: False            # lin layer bias, not gpt2 training bias
+
+
+# MOE config
+n_experts: 1
