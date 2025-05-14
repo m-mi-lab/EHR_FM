@@ -1,0 +1,19 @@
+title: Experiment Results (2025-05-14)
+max_steps: 25000
+smoothing_weight: 0.8
+runs:
+  2025-05-12/17-32-35_/tensorboard_logs:
+    legend: Run 14 (2025-05-12)
+    color: null
+    linestyle: '-'
+    visible: true
+  2025-05-12/20-56-57_/tensorboard_logs:
+    legend: Run 15 (2025-05-12)
+    color: null
+    linestyle: '-'
+    visible: true
+  2025-05-14/00-56-55_/tensorboard_logs:
+    legend: Run 16 (2025-05-14)
+    color: null
+    linestyle: '-'
+    visible: true

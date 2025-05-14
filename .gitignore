@@ -5,3 +5,4 @@ __pycache__/
  *.pyc
 ehr_fm.egg-info/
 *.egg-info/
+plots/

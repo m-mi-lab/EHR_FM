@@ -1,0 +1,30 @@
+# train loop params
+max_iters: 60000
+eval_interval: 2000   
+eval_iters: 200      # batches for evaluation
+log_interval: 10       
+save_checkpoints: True 
+
+resume_from_checkpoint: null # not required now
+
+# Optimizer 
+lr: 6e-4             
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.95
+grad_clip: 1.0         # 0.0 to disable 
+
+# lr
+decay_lr: True         
+warmup_iters: 1000    
+lr_decay_iters: ${train.max_iters}
+min_lr: 6e-5
+
+# main
+batch_size: 64 # individual_batch_size * gradient_accumulation_steps * num_gpus --- 4096, 16 if 1 expert
+gradient_accumulation_steps: 8
+dtype: 'float16'       # 'float32', 'bfloat16', or 'float16'
+num_workers: 0      # data loaders 
+ddp_find_unused_params: False # if ddp says unused params, set to True
+out_dir: ${hydra:run.dir}
+
