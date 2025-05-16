@@ -1,6 +1,6 @@
 defaults:
-  - train: 2_exp 
-  - model: gpt2_small_2exp    
+  - train: 4_exp
+  - model: gpt2_small_4exp    
   - data: mimic_data          
   - _self_                    
 

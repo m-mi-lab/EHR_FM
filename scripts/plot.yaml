@@ -1,19 +1,29 @@
-title: Experiment Results (2025-05-14)
+title: MoE experiments
 max_steps: 25000
 smoothing_weight: 0.8
 runs:
   2025-05-12/17-32-35_/tensorboard_logs:
-    legend: Run 14 (2025-05-12)
-    color: null
-    linestyle: '-'
-    visible: true
-  2025-05-12/20-56-57_/tensorboard_logs:
-    legend: Run 15 (2025-05-12)
+    legend: exp:4 aux_loss:true router_loss:true  
     color: null
     linestyle: '-'
     visible: true
   2025-05-14/00-56-55_/tensorboard_logs:
-    legend: Run 16 (2025-05-14)
+    legend: exp:2 aux_loss:true router_loss:true  
+    color: null
+    linestyle: '-'
+    visible: true
+  2025-05-14/02-53-17_/tensorboard_logs:
+    legend: Monolith
+    color: null
+    linestyle: '-'
+    visible: true
+  2025-05-14/07-39-46_/tensorboard_logs:
+    legend: exp:2 aux_loss:true router_loss:false 
+    color: null
+    linestyle: '-'
+    visible: true
+  2025-05-14/07-48-34_/tensorboard_logs:
+    legend: exp:4 aux_loss:true router_loss:false 
     color: null
     linestyle: '-'
     visible: true

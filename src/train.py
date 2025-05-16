@@ -15,6 +15,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from transformers import GPT2Config
 from loguru import logger
+from torch.profiler import profile, record_function, ProfilerActivity, tensorboard_trace_handler
 from torch.utils.tensorboard import SummaryWriter
 from contextlib import nullcontext
 
@@ -23,7 +24,7 @@ from src.tokenizer.datasets import TimelineDataset
 from src.tokenizer.vocabulary import Vocabulary 
 from src.metrics import estimate_loss
 from src.manager import MANAGER # MOEManager instance
-from model import GPT2LMNoBiasModel, ModelOutput # Import ModelOutput if not already
+from model import GPT2LMNoBiasModel, ModelOutput
 
 # ModelOutput is already defined in model.py, no need to redefine here if imported
 # ModelOutput = namedtuple("ModelOutput", ["loss", "logits", "aux_loss", "router_z_loss"])
@@ -31,7 +32,8 @@ from model import GPT2LMNoBiasModel, ModelOutput # Import ModelOutput if not alr
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    # os.environ['MASTER_PORT'] = '12355'
+    os.environ['MASTER_PORT'] = '23556'
     backend = 'nccl' if torch.cuda.is_available() else 'gloo'
     dist.init_process_group(backend, rank=rank, world_size=world_size)
 
@@ -95,6 +97,10 @@ def train_worker(rank, world_size, cfg: DictConfig):
         tb_log_dir = Path(cfg.train.out_dir) / "tensorboard_logs"
         writer = SummaryWriter(log_dir=str(tb_log_dir))
         logger.info(f"Tensorboard logs will be saved to: {tb_log_dir}")
+
+        profiler_log_dir = Path(cfg.train.out_dir) / "profiler_traces"
+        profiler_log_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Profiler traces will be saved to: {profiler_log_dir}")
 
     if torch.cuda.is_available():
         torch.cuda.set_device(rank)
@@ -265,6 +271,13 @@ def train_worker(rank, world_size, cfg: DictConfig):
     t0 = time.time()
     local_iter_num = 0 
 
+    # for profiler
+    activities = [ProfilerActivity.CPU]
+    if device.type == 'cuda':
+        activities.append(ProfilerActivity.CUDA)
+
+    profile_schedule = torch.profiler.schedule(wait=10, warmup=2, active=5, repeat=1)
+
     while iter_num < cfg.train.max_iters:
         lr = get_lr(iter_num, cfg.train) if cfg.train.decay_lr else cfg.train.lr
         for param_group in optimizer.param_groups:
@@ -274,8 +287,32 @@ def train_worker(rank, world_size, cfg: DictConfig):
             if rank == 0:
                 logger.info(f"Evaluating at step {iter_num}...")
                 eval_model = raw_model
+
+
+                with profile(
+                    activities=activities,
+                    record_shapes=True,
+                    profile_memory=True,
+                    with_stack=True, # Good for more detailed analysis, but can add overhead
+                    on_trace_ready=tensorboard_trace_handler(str(profiler_log_dir / f"val_iter_{iter_num}")),
+                    # schedule=torch.profiler.schedule(wait=0, warmup=1, active=cfg.train.eval_iters, repeat=1) # Profile all eval iters
+                ) as val_prof:
+                    val_start_time = time.time()
+                    # Note: estimate_loss itself might need to be adjusted if it has internal loops
+                    # and you want to profile each of those.
+                    # For now, we profile the entire estimate_loss call.
+                    losses = estimate_loss(eval_model, ctx, get_batch_worker, cfg.train.eval_iters, tokens_of_interest, cfg.model)
+                    val_end_time = time.time()
+                    val_prof.step() # Mark profiler step after validation
+
+                val_duration = val_end_time - val_start_time
+                val_throughput = (cfg.train.eval_iters * batch_size_per_gpu * world_size) / val_duration if val_duration > 0 else 0
+                val_latency = (val_duration * 1000) / (cfg.train.eval_iters * batch_size_per_gpu * world_size) if (cfg.train.eval_iters * batch_size_per_gpu * world_size) > 0 else 0
+
                 # Pass the moe_hydra_config to estimate_loss if it needs MoE specific details
-                losses = estimate_loss(eval_model, ctx, get_batch_worker, cfg.train.eval_iters, tokens_of_interest, cfg.model)
+                # losses = estimate_loss(eval_model, ctx, get_batch_worker, cfg.train.eval_iters, tokens_of_interest, cfg.model)
+
+
                 val_loss = losses.get('loss/val', float('nan')) # main validation loss
                 logger.info(f"--- Eval Results (iter {iter_num}) ---")
                 if writer:
@@ -285,10 +322,19 @@ def train_worker(rank, world_size, cfg: DictConfig):
                         tag_suffix = '/'.join(parts[:-1]) if len(parts) > 1 else k
                         writer.add_scalar(f"{tag_prefix}/{tag_suffix}", v_val, iter_num)
                         logger.info(f"{k}: {v_val:.4f}")
+
+
+                        writer.add_scalar(f"Val/latency_ms_per_sample", val_latency, iter_num)
+                        writer.add_scalar(f"Val/throughput_samples_sec", val_throughput, iter_num)
+                        if device.type == 'cuda':
+                            writer.add_scalar(f"Val/peak_memory_MB_gpu{rank}", torch.cuda.max_memory_allocated(device) / (1024*1024), iter_num)
+                            torch.cuda.reset_peak_memory_stats(device) # Reset for next measurement
                     writer.flush()
                 else:
                      for k, v_val in losses.items():
                           logger.info(f"{k}: {v_val:.4f}")
+                     logger.info(f"Val/latency_ms_per_sample: {val_latency:.4f}")
+                     logger.info(f"Val/throughput_samples_sec: {val_throughput:.2f}")
                 logger.info(f"--------------------")
 
                 if cfg.train.save_checkpoints and not math.isnan(val_loss) and val_loss < best_val_loss:
@@ -324,48 +370,74 @@ def train_worker(rank, world_size, cfg: DictConfig):
                 dist.barrier()
 
         model.train()
-        optimizer.zero_grad(set_to_none=True)
+
+
+        if rank == 0:
+            current_profiler_context = profile(
+                activities=activities,
+                schedule=profile_schedule, # Use the defined schedule
+                on_trace_ready=tensorboard_trace_handler(str(profiler_log_dir / f"train_iter_{iter_num}")),
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True
+            )
+        else:
+            current_profiler_context = nullcontext() # No-op context for other ranks
+
+
+        with current_profiler_context as train_prof:
+            optimizer.zero_grad(set_to_none=True)
+            
+            accumulated_loss_value = 0.0 # For logging the accumulated main loss
+            accumulated_raw_aux_loss = None
+            accumulated_raw_router_z_loss = None
+            iter_start_time = time.time()
+
+            for micro_step in range(cfg.train.gradient_accumulation_steps):
+                # DDP sync for last micro_step or if not using DDP
+                sync_context = model.no_sync if (world_size > 1 and (micro_step < cfg.train.gradient_accumulation_steps - 1)) else nullcontext
+                with sync_context():
+                    with ctx:
+                        with record_function("train_forward_pass"):
+                            X, Y = get_batch_worker("train")
+                            output: ModelOutput = model(X, Y) # output is ModelOutput
+                            loss = output.loss 
+                            loss = loss / cfg.train.gradient_accumulation_steps # Normalize loss for accumulation
+
+                        accumulated_loss_value += loss.item() * cfg.train.gradient_accumulation_steps # De-normalize for logging sum
+                        # Accumulate raw aux losses for logging (average over micro_steps)
+                        if output.aux_loss is not None:
+                            if accumulated_raw_aux_loss is None: accumulated_raw_aux_loss = 0.0
+                            accumulated_raw_aux_loss += output.aux_loss.item()
+                        if output.router_z_loss is not None:
+                            if accumulated_raw_router_z_loss is None: accumulated_raw_router_z_loss = 0.0
+                            accumulated_raw_router_z_loss += output.router_z_loss.item()
+                        with record_function("train_backward_pass"):
+                            scaler.scale(loss).backward()
+
+            if cfg.train.grad_clip > 0.0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
         
-        accumulated_loss_value = 0.0 # For logging the accumulated main loss
-        accumulated_raw_aux_loss = None
-        accumulated_raw_router_z_loss = None
+            scaler.step(optimizer)
+            scaler.update()
+            iter_end_time = time.time()
+            if rank == 0 and train_prof: # If profiler was active for this step
+                train_prof.step() # Signal the profiler that a step is complete
 
-
-        for micro_step in range(cfg.train.gradient_accumulation_steps):
-            # DDP sync for last micro_step or if not using DDP
-            sync_context = model.no_sync if (world_size > 1 and (micro_step < cfg.train.gradient_accumulation_steps - 1)) else nullcontext
-            with sync_context():
-                with ctx:
-                    X, Y = get_batch_worker("train")
-                    output: ModelOutput = model(X, Y) # output is ModelOutput
-                    
-                    # The loss from model output already includes weighted auxiliary losses
-                    loss = output.loss 
-                    loss = loss / cfg.train.gradient_accumulation_steps # Normalize loss for accumulation
-
-                accumulated_loss_value += loss.item() * cfg.train.gradient_accumulation_steps # De-normalize for logging sum
-                
-                # Accumulate raw aux losses for logging (average over micro_steps)
-                if output.aux_loss is not None:
-                    if accumulated_raw_aux_loss is None: accumulated_raw_aux_loss = 0.0
-                    accumulated_raw_aux_loss += output.aux_loss.item()
-                if output.router_z_loss is not None:
-                    if accumulated_raw_router_z_loss is None: accumulated_raw_router_z_loss = 0.0
-                    accumulated_raw_router_z_loss += output.router_z_loss.item()
-
-                scaler.scale(loss).backward()
-
-        if cfg.train.grad_clip > 0.0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
-        
-        scaler.step(optimizer)
-        scaler.update()
 
         if rank == 0:
             t1 = time.time()
             dt = t1 - t0
             t0 = t1
+
+
+            iter_duration = iter_end_time - iter_start_time
+            samples_processed_this_iter = cfg.train.gradient_accumulation_steps * batch_size_per_gpu * world_size
+            train_throughput_iter = samples_processed_this_iter / iter_duration if iter_duration > 0 else 0
+            train_latency_iter = (iter_duration * 1000) / samples_processed_this_iter if samples_processed_this_iter > 0 else 0
+
+            
             if iter_num % cfg.train.log_interval == 0:
                 # Log the average loss over accumulation steps
                 avg_loss_this_step = accumulated_loss_value / cfg.train.gradient_accumulation_steps
@@ -373,8 +445,15 @@ def train_worker(rank, world_size, cfg: DictConfig):
                 if writer:
                     writer.add_scalar('Loss/train_main', avg_loss_this_step, iter_num)
                     writer.add_scalar('Meta/learning_rate', lr, iter_num)
-                    writer.add_scalar('Meta/iter_time_ms', dt*1000, iter_num)
+                    writer.add_scalar('Meta/iter_time_ms_overall', dt*1000, iter_num) # This is overall wall time
+                    writer.add_scalar('Train/latency_ms_per_sample_iter', train_latency_iter, iter_num)
+                    writer.add_scalar('Train/throughput_samples_sec_iter', train_throughput_iter, iter_num)
                     
+                    if device.type == 'cuda':
+                        writer.add_scalar(f"Train/peak_memory_MB_gpu{rank}", torch.cuda.max_memory_allocated(device) / (1024*1024), iter_num)
+                        torch.cuda.reset_peak_memory_stats(device) # Reset for next measurement
+
+                        
                     if is_moe_model: # Log raw (unweighted) aux losses averaged over micro_steps
                         if accumulated_raw_aux_loss is not None:
                             avg_raw_aux_loss = accumulated_raw_aux_loss / cfg.train.gradient_accumulation_steps

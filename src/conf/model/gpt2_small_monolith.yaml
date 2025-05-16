@@ -14,7 +14,3 @@ resid_pdrop: 0.0
 embd_pdrop: 0.0
 attn_pdrop: 0.0
 bias: False            # lin layer bias, not gpt2 training bias
-
-
-# MOE config
-n_experts: 1
