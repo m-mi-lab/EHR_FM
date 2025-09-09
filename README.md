@@ -5,7 +5,6 @@ conda deactivate
 conda create --name MEDS python=3.12 
 conda activate MEDS 
 pip install -e .[jupyter] 
-
 ```
 
 ```
