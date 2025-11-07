@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  training:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ehr_fm_training
+    image: ehr-fm:latest
+    runtime: nvidia
+    ipc: host  # Important for PyTorch DDP multiprocessing
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_EXPERIMENT_NAME=${MLFLOW_EXPERIMENT_NAME:-EHR_FM}
+    volumes:
+      # Mount data directory (adjust path as needed)
+      # Based on your run.sh, you mounted ehr_stuff to /workspace/ehr_stuff
+      - ${DATA_DIR:-./data}:/workspace/data:ro
+      # Mount outputs directory to persist checkpoints and logs
+      - ${OUTPUTS_DIR:-./outputs}:/workspace/outputs
+      # Mount config directory if you want to modify configs
+      - ./src/conf:/workspace/src/conf:ro
+      # If you need the full ehr_stuff directory structure
+      - ${EHR_STUFF_DIR:-./ehr_stuff}:/workspace/ehr_stuff
+    networks:
+      - ehr_fm_network
+    depends_on:
+      - mlflow
+    stdin_open: true  # Keep STDIN open for interactive use
+    tty: true         # Allocate a pseudo-TTY for interactive use
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.9.2
+    container_name: ehr_fm_mlflow
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=file:/mlflow/mlruns
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=file:/mlflow/artifacts
+    volumes:
+      # Persist MLflow data
+      - ${MLFLOW_DATA_DIR:-./mlflow_data}:/mlflow
+      # Optionally mount outputs to track artifacts
+      - ${OUTPUTS_DIR:-./outputs}:/workspace/outputs:ro
+    networks:
+      - ehr_fm_network
+    command: mlflow server --host 0.0.0.0 --port 5000 --default-artifact-root file:/mlflow/artifacts
+    restart: unless-stopped
+
+  tensorboard:
+    image: tensorflow/tensorflow:latest
+    container_name: ehr_fm_tensorboard
+    ports:
+      - "${TENSORBOARD_PORT:-6006}:6006"
+    volumes:
+      - ${OUTPUTS_DIR:-./outputs}:/workspace/outputs:ro
+    networks:
+      - ehr_fm_network
+    command: tensorboard --logdir=/workspace/outputs --host=0.0.0.0 --port=6006
+    restart: unless-stopped
+
+networks:
+  ehr_fm_network:
+    driver: bridge
+
+volumes:
+  mlflow_data:
+  outputs_data:
+

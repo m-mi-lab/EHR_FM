@@ -29,6 +29,7 @@ dependencies = [
     "safetensors",
     "tqdm",
     "wandb",
+    "mlflow",
     "MEDS_transforms~=0.1.0",
     "pyarrow",
     "numpy",

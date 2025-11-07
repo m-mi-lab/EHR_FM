@@ -18,6 +18,7 @@ from loguru import logger
 from torch.profiler import profile, record_function, ProfilerActivity, tensorboard_trace_handler
 from torch.utils.tensorboard import SummaryWriter
 from contextlib import nullcontext
+import mlflow
 
 from src.tokenizer.constants import SpecialToken as ST
 from src.tokenizer.datasets import TimelineDataset
@@ -72,6 +73,20 @@ def make_infinite_loader(loader):
     while True:
         yield from iter(loader)
 
+def _flatten_dict(d, parent_key='', sep='.'):
+    """Flatten nested dictionary for MLflow parameter logging."""
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(_flatten_dict(v, new_key, sep=sep).items())
+        elif isinstance(v, (list, tuple)):
+            # Convert lists/tuples to strings for MLflow
+            items.append((new_key, str(v)))
+        else:
+            items.append((new_key, v))
+    return dict(items)
+
 
 def train_worker(rank, world_size, cfg: DictConfig):
     logger.remove()
@@ -93,6 +108,7 @@ def train_worker(rank, world_size, cfg: DictConfig):
     logger.info(f"Rank {rank}/{world_size} initialized process group.")
 
     writer = None
+    mlflow_run = None
     if rank == 0:
         tb_log_dir = Path(cfg.train.out_dir) / "tensorboard_logs"
         writer = SummaryWriter(log_dir=str(tb_log_dir))
@@ -101,6 +117,27 @@ def train_worker(rank, world_size, cfg: DictConfig):
         profiler_log_dir = Path(cfg.train.out_dir) / "profiler_traces"
         profiler_log_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Profiler traces will be saved to: {profiler_log_dir}")
+
+        # Initialize MLflow
+        mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+        mlflow_experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "EHR_FM")
+        try:
+            mlflow.set_tracking_uri(mlflow_tracking_uri)
+            mlflow.set_experiment(mlflow_experiment_name)
+            mlflow_run = mlflow.start_run()
+            logger.info(f"MLflow tracking initialized: {mlflow_tracking_uri}, experiment: {mlflow_experiment_name}")
+            
+            # Log hyperparameters
+            flat_config = OmegaConf.to_container(cfg, resolve=True)
+            mlflow.log_params(_flatten_dict(flat_config))
+            
+            # Log tags
+            mlflow.set_tag("model_type", "MoE" if (hasattr(cfg.model, 'n_experts') and cfg.model.n_experts > 1) else "Standard GPT")
+            mlflow.set_tag("world_size", str(world_size))
+            mlflow.set_tag("dtype", cfg.train.dtype)
+        except Exception as e:
+            logger.warning(f"Failed to initialize MLflow: {e}. Continuing without MLflow logging.")
+            mlflow_run = None
 
     if torch.cuda.is_available():
         torch.cuda.set_device(rank)
@@ -335,12 +372,34 @@ def train_worker(rank, world_size, cfg: DictConfig):
                           logger.info(f"{k}: {v_val:.4f}")
                      logger.info(f"Val/latency_ms_per_sample: {val_latency:.4f}")
                      logger.info(f"Val/throughput_samples_sec: {val_throughput:.2f}")
+                
+                # Log to MLflow (only on rank 0)
+                if mlflow_run:
+                    try:
+                        mlflow.log_metrics({f"val_{k}": v_val for k, v_val in losses.items()}, step=iter_num)
+                        mlflow.log_metrics({
+                            "val_latency_ms_per_sample": val_latency,
+                            "val_throughput_samples_sec": val_throughput
+                        }, step=iter_num)
+                        if device.type == 'cuda':
+                            mlflow.log_metrics({
+                                f"val_peak_memory_MB_gpu{rank}": torch.cuda.max_memory_allocated(device) / (1024*1024)
+                            }, step=iter_num)
+                    except Exception as e:
+                        logger.warning(f"Failed to log metrics to MLflow: {e}")
                 logger.info(f"--------------------")
 
                 if cfg.train.save_checkpoints and not math.isnan(val_loss) and val_loss < best_val_loss:
                     best_val_loss = val_loss
                     if writer:
                         writer.add_scalar('Loss/best_val_main', best_val_loss, iter_num)
+                    
+                    # Log best validation loss to MLflow
+                    if mlflow_run:
+                        try:
+                            mlflow.log_metric("best_val_loss", best_val_loss, step=iter_num)
+                        except Exception as e:
+                            logger.warning(f"Failed to log best_val_loss to MLflow: {e}")
                     
                     # # Get config from raw_model (GPT2LMNoBiasModel instance)
                     # # It stores base_config and moe_config
@@ -366,6 +425,13 @@ def train_worker(rank, world_size, cfg: DictConfig):
                     recent_ckpt_path = Path(cfg.train.out_dir) / f"ckpt_{iter_num}.pt"
                     logger.info(f"Saving recent checkpoint to {recent_ckpt_path}")
                     torch.save(checkpoint, recent_ckpt_path)
+                    
+                    # Log checkpoint as artifact to MLflow
+                    if mlflow_run:
+                        try:
+                            mlflow.log_artifact(str(ckpt_path), artifact_path="checkpoints")
+                        except Exception as e:
+                            logger.warning(f"Failed to log checkpoint to MLflow: {e}")
             if world_size > 1:
                 dist.barrier()
 
@@ -467,6 +533,36 @@ def train_worker(rank, world_size, cfg: DictConfig):
                             weighted_rz = avg_raw_router_z_loss * getattr(cfg.model, 'router_z_loss_weight', 0.001)
                             writer.add_scalar('MoE/router_z_loss_weighted_train', weighted_rz, iter_num)
                     writer.flush()
+                
+                # Log to MLflow
+                if mlflow_run:
+                    try:
+                        mlflow.log_metrics({
+                            "train_loss": avg_loss_this_step,
+                            "learning_rate": lr,
+                            "iter_time_ms_overall": dt*1000,
+                            "train_latency_ms_per_sample": train_latency_iter,
+                            "train_throughput_samples_sec": train_throughput_iter
+                        }, step=iter_num)
+                        if device.type == 'cuda':
+                            mlflow.log_metrics({
+                                f"train_peak_memory_MB_gpu{rank}": torch.cuda.max_memory_allocated(device) / (1024*1024)
+                            }, step=iter_num)
+                        if is_moe_model:
+                            if accumulated_raw_aux_loss is not None:
+                                avg_raw_aux_loss = accumulated_raw_aux_loss / cfg.train.gradient_accumulation_steps
+                                mlflow.log_metrics({
+                                    "moe_aux_loss_raw_train": avg_raw_aux_loss,
+                                    "moe_aux_loss_weighted_train": avg_raw_aux_loss * getattr(cfg.model, 'aux_loss_weight', 0.01)
+                                }, step=iter_num)
+                            if accumulated_raw_router_z_loss is not None:
+                                avg_raw_router_z_loss = accumulated_raw_router_z_loss / cfg.train.gradient_accumulation_steps
+                                mlflow.log_metrics({
+                                    "moe_router_z_loss_raw_train": avg_raw_router_z_loss,
+                                    "moe_router_z_loss_weighted_train": avg_raw_router_z_loss * getattr(cfg.model, 'router_z_loss_weight', 0.001)
+                                }, step=iter_num)
+                    except Exception as e:
+                        logger.warning(f"Failed to log metrics to MLflow: {e}")
 
         iter_num += 1
         local_iter_num += 1
@@ -496,6 +592,13 @@ def train_worker(rank, world_size, cfg: DictConfig):
 
     if rank == 0 and writer:
         writer.close()
+    
+    if rank == 0 and mlflow_run:
+        try:
+            mlflow.end_run()
+            logger.info("MLflow run ended successfully.")
+        except Exception as e:
+            logger.warning(f"Failed to end MLflow run: {e}")
 
     cleanup()
     logger.info(f"Rank {rank} finished training worker.")
