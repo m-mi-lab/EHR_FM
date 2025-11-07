@@ -21,9 +21,7 @@ services:
       # Mount outputs directory to persist checkpoints and logs
       - ${OUTPUTS_DIR:-./outputs}:/workspace/outputs
       # Mount config directory if you want to modify configs
-      - ./src/conf:/workspace/src/conf:ro
-      # If you need the full ehr_stuff directory structure
-      - ${EHR_STUFF_DIR:-./ehr_stuff}:/workspace/ehr_stuff
+      - ./src/conf:/workspace/src/conf
     networks:
       - ehr_fm_network
     depends_on:

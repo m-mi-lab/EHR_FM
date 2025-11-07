@@ -1,2 +1,2 @@
-tokenized_dir: "/workspace/ehr_stuff/EHR_FM/data/tokenized_datasets/mimic_train"
+tokenized_dir: "/workspace/data/tokenized_datasets/mimic_train"
 val_split_fraction: 0.05 
