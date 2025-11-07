@@ -6,3 +6,13 @@ __pycache__/
 ehr_fm.egg-info/
 *.egg-info/
 plots/
+
+# Results and outputs
+scripts/*_results/
+scripts/*_results_*/
+inference_results.json
+*.log
+
+# Test files
+test.py
+test.ipynb

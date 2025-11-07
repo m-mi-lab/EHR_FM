@@ -38,6 +38,7 @@ def estimate_loss(
         toi_res = defaultdict(list)
         
         # Run evaluation for specified number of iterations
+        last_output = None
         for i in range(eval_iters):
             try:
                 # Get batch data
@@ -50,6 +51,9 @@ def estimate_loss(
                         output = model(input_ids=X[0], decoder_input_ids=X[1], labels=Y)
                     else:
                         output = model(input_ids=X, labels=Y)
+                    
+                    # Store the last successful output for MoE metrics
+                    last_output = output
                     
                     # Get loss and logits from model output
                     if hasattr(output, 'loss'):
@@ -112,11 +116,11 @@ def estimate_loss(
         is_moe_eval = hasattr(moe_config, 'n_experts') and getattr(moe_config, 'n_experts', 0) > 1
         if hasattr(model, 'moe_config'):
             is_moe_eval_model = hasattr(model.moe_config, 'n_experts') and getattr(model.moe_config, 'n_experts', 0) > 1
-            if is_moe_eval_model:
-                if hasattr(output, 'aux_loss') and output.aux_loss is not None:
-                        out[f'moe/aux_loss_raw/{split}'] = output.aux_loss.item() # Or average it if eval_iters > 1
-                if hasattr(output, 'router_z_loss') and output.router_z_loss is not None:
-                        out[f'moe/router_z_loss_raw/{split}'] = output.router_z_loss.item()
+            if is_moe_eval_model and last_output is not None:
+                if hasattr(last_output, 'aux_loss') and last_output.aux_loss is not None:
+                        out[f'moe/aux_loss_raw/{split}'] = last_output.aux_loss.item() # Or average it if eval_iters > 1
+                if hasattr(last_output, 'router_z_loss') and last_output.router_z_loss is not None:
+                        out[f'moe/router_z_loss_raw/{split}'] = last_output.router_z_loss.item()
     model.train()
     
     return out

@@ -21,7 +21,7 @@ lr_decay_iters: ${train.max_iters}
 min_lr: 6e-5
 
 # main
-batch_size: 16 # individual_batch_size * gradient_accumulation_steps * num_gpus --- 4096, 16 if 1 expert
+batch_size: 16 # reduced for memory efficiency
 gradient_accumulation_steps: 4
 dtype: 'float16'       # 'float32', 'bfloat16', or 'float16'
 num_workers: 0      # data loaders 
