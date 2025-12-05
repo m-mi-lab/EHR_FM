@@ -5,12 +5,54 @@ from contextlib import nullcontext
 import math
 import transformers.activations
 from transformers import GPT2Config
+import torch.distributed as dist
 
 from src.manager import MANAGER
+from src.distributed import (
+    AllGather,
+    split_by_rank,
+    gather_sizes,
+    pad_dim_to,
+    has_only_one_value,
+    chunk_num
+)
 
 from collections import namedtuple
 # Make sure aux_loss and router_z_loss from ModelOutput are the raw, unweighted losses for logging
 ModelOutput = namedtuple("ModelOutput", ["loss", "logits", "aux_loss", "router_z_loss"])
+
+# Helper functions for MoE
+def log(t, eps=1e-20):
+    return torch.log(t.clamp(min=eps))
+
+def gumbel_noise(t):
+    noise = torch.zeros_like(t).uniform_(0, 1)
+    return -log(-log(noise))
+
+def safe_one_hot(indexes, max_length):
+    max_index = indexes.max() + 1
+    one_hot_classes = max(max_index + 1, max_length)
+    return F.one_hot(indexes, one_hot_classes)[..., :max_length]
+
+def cumsum_exclusive(t, dim=-2):
+    """Exclusive cumsum along specified dimension"""
+    assert dim < 0
+    num_pad_dims = -dim - 1
+    pre_padding = (0, 0) * num_pad_dims
+    return F.pad(t, (*pre_padding, 1, -1)).cumsum(dim=dim)
+
+def cast_tuple(el, length=1):
+    return el if isinstance(el, tuple) else ((el,) * length)
+
+def pack_one(t, pattern):
+    """Pack a single tensor (helper for einops)."""
+    from einops import pack
+    return pack([t], pattern)
+
+def unpack_one(t, ps, pattern):
+    """Unpack a single tensor (helper for einops)."""
+    from einops import unpack
+    return unpack(t, ps, pattern)[0]
 
 class CausalSelfAttention(torch.nn.Module):
     def __init__(self, config, attention_weights: list | None = None):
@@ -62,37 +104,73 @@ class CausalSelfAttention(torch.nn.Module):
         y = self.resid_dropout(self.c_proj(y))
         return y
 
+# RMSNorm for experts
+class RMSNorm(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.scale = dim ** 0.5
+        self.gamma = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        return F.normalize(x, dim=-1) * self.gamma * self.scale
+
+# GEGLU activation for experts
+class GEGLU(nn.Module):
+    def __init__(self, dim, mult_bias=True):
+        super().__init__()
+        self.mult_bias = nn.Parameter(torch.ones(dim)) if mult_bias else 1.
+
+    def forward(self, x):
+        x, gate = x.chunk(2, dim=-1)
+        return F.gelu(gate) * x * self.mult_bias
+
 class MLP(torch.nn.Module):
-    def __init__(self, config): 
+    def __init__(self, config, is_distributed=None, allow_var_seq_len=False): 
         super().__init__()
         
         self.is_moe = hasattr(config, 'n_experts') and config.n_experts > 1
         
         if self.is_moe:
-            # MoE parameters
+            # MoE parameters - using GEGLU architecture
             self.n_embd = config.n_embd 
             self.n_exp = config.n_experts
-            self.hidden_dim = getattr(config, 'n_inner', 4 * config.n_embd) 
+            hidden_mult = getattr(config, 'expert_hidden_mult', 4)
+            self.dim_hidden = int(config.n_embd * hidden_mult * 2 / 3)
             self.bias = getattr(config, 'bias', False)
+            self.mult_bias = getattr(config, 'expert_mult_bias', True)
+            self.prenorm = getattr(config, 'expert_prenorm', False)
 
-            self.c_fc = nn.Parameter(torch.empty(self.n_exp, self.n_embd, self.hidden_dim))
+            # Expert networks: RMSNorm -> Linear -> GEGLU -> Linear
+            if self.prenorm:
+                self.norm = RMSNorm(config.n_embd)
+            else:
+                self.norm = None
+            
+            self.c_fc = nn.Parameter(torch.empty(self.n_exp, config.n_embd, self.dim_hidden * 2))
+            self.c_proj = nn.Parameter(torch.empty(self.n_exp, self.dim_hidden, config.n_embd))
+            
             if self.bias:
-                self.c_fc_bias = nn.Parameter(torch.empty(self.n_exp, 1, self.hidden_dim))
+                self.c_fc_bias = nn.Parameter(torch.empty(self.n_exp, 1, self.dim_hidden * 2))
+                self.c_proj_bias = nn.Parameter(torch.empty(self.n_exp, 1, config.n_embd))
             else:
                 self.register_parameter('c_fc_bias', None)
-
-            self.activation = transformers.activations.get_activation(config.activation_function)
-
-            self.c_proj = nn.Parameter(torch.empty(self.n_exp, self.hidden_dim, self.n_embd))
-            if self.bias:
-                self.c_proj_bias = nn.Parameter(torch.empty(self.n_exp, 1, self.n_embd))
-            else:
                 self.register_parameter('c_proj_bias', None)
-                
+            
+            self.geglu = GEGLU(self.dim_hidden, mult_bias=self.mult_bias)
             self._init_weights()
+            
+            # Distributed settings
+            self.is_distributed = is_distributed
+            if self.is_distributed is None:
+                self.is_distributed = dist.is_initialized() and dist.get_world_size() > 1
+            
+            self.all_gather = AllGather()
+            self.allow_var_seq_len = allow_var_seq_len
+            
+            # Device tracker for distributed training
+            self.register_buffer('dummy', torch.ones(1), persistent=False)
         else:
             # Standard MLP parameters
-
             n_inner = 4 * config.n_embd  # Default value as fallback
             if hasattr(config, 'n_inner') and config.n_inner is not None:
                 n_inner = config.n_inner
@@ -103,34 +181,164 @@ class MLP(torch.nn.Module):
         
         self.dropout = nn.Dropout(config.resid_pdrop)
 
+    @property
+    def device(self):
+        if self.is_moe:
+            return self.dummy.device
+        return next(self.parameters()).device
+
     def _init_weights(self):
         if hasattr(self, 'c_fc') and isinstance(self.c_fc, nn.Parameter):
-            torch.nn.init.normal_(self.c_fc, mean=0.0, std=0.02)
+            dim = self.c_fc.shape[0] if len(self.c_fc.shape) > 2 else self.n_embd
+            std = dim ** -0.5
+            torch.nn.init.uniform_(self.c_fc, -std, std)
         if hasattr(self, 'c_proj') and isinstance(self.c_proj, nn.Parameter):
-            torch.nn.init.normal_(self.c_proj, mean=0.0, std=0.02)
+            dim = self.c_proj.shape[0] if len(self.c_proj.shape) > 2 else self.dim_hidden
+            std = dim ** -0.5
+            torch.nn.init.uniform_(self.c_proj, -std, std)
         if hasattr(self, 'c_fc_bias') and self.c_fc_bias is not None:
-            torch.nn.init.zeros_(self.c_fc_bias)
+            dim = self.c_fc_bias.shape[1]
+            std = dim ** -0.5
+            torch.nn.init.uniform_(self.c_fc_bias, -std, std)
         if hasattr(self, 'c_proj_bias') and self.c_proj_bias is not None:
-            torch.nn.init.zeros_(self.c_proj_bias)
+            dim = self.c_proj_bias.shape[1]
+            std = dim ** -0.5
+            torch.nn.init.uniform_(self.c_proj_bias, -std, std)
 
-    def forward(self, x):
+    def forward(self, x, is_distributed=None):
         if self.is_moe:
-            # For MoE, x is already batched by experts
-            # Process each expert's tokens
-            x = torch.bmm(x, self.c_fc)
-            if self.c_fc_bias is not None:
-                x = x + self.c_fc_bias
-            x = self.activation(x)
-            x = torch.bmm(x, self.c_proj)
-            if self.c_proj_bias is not None:
-                x = x + self.c_proj_bias
+            """
+            Forward pass for MoE with distributed support
+            x: [B, n_experts, capacity, n_embd] for non-distributed
+               [r*B, n_experts, capacity, n_embd] for distributed (after all-gather)
+            """
+            is_distributed = is_distributed if is_distributed is not None else self.is_distributed
+            shape = x.shape
+            seq_len = shape[-2]  # capacity dimension
+            
+            # For distributed: gather across batch dimension
+            world_size = 1
+            rank = 0
+            
+            if is_distributed:
+                seq_sizes = gather_sizes(x, dim=-2)
+                var_seq_len = not has_only_one_value(seq_sizes)
+                
+                assert self.allow_var_seq_len or not var_seq_len, \
+                    'number of tokens per expert must be the same - set `allow_var_seq_len=True` to handle variable lengths'
+                
+                # Pad if variable sequence length
+                if var_seq_len:
+                    max_seq_size = seq_sizes.amax().item()
+                    x = pad_dim_to(x, max_seq_size, dim=-2)
+                
+                # All-gather across batches
+                x, batch_sizes = self.all_gather(x)
+                total_batch_size = batch_sizes.sum().item()
+                
+                world_size = dist.get_world_size()
+                rank = dist.get_rank()
+            
+            # Determine which experts this rank handles
+            num_experts_per_rank = self.n_exp
+            expert_slice = slice(0, self.n_exp)
+            
+            if is_distributed:
+                if world_size <= self.n_exp:
+                    # More experts than GPUs: each GPU handles subset of experts
+                    num_experts_across_ranks = chunk_num(self.n_exp, world_size)
+                    start_indices = cumsum_exclusive(torch.tensor(num_experts_across_ranks), dim=-1)
+                    
+                    num_experts_per_rank = num_experts_across_ranks[rank]
+                    num_experts_batches_across_ranks = tuple(i * total_batch_size for i in num_experts_across_ranks)
+                    
+                    expert_start_index = start_indices[rank].item()
+                else:
+                    # More GPUs than experts: each expert handled by multiple GPUs (batch-split)
+                    num_batch_chunks = world_size // self.n_exp
+                    total_ranks_in_use = num_batch_chunks * self.n_exp
+                    
+                    expert_start_index = rank // num_batch_chunks
+                    
+                    batch_splits = chunk_num(total_batch_size, num_batch_chunks)
+                    num_experts_batches_across_ranks = batch_splits * self.n_exp
+                    
+                    # Remaining machines process nothing
+                    remain_ranks = world_size % self.n_exp
+                    num_experts_batches_across_ranks += (0,) * remain_ranks
+                    
+                    num_experts_per_rank = int(rank < total_ranks_in_use)
+                
+                assert len(num_experts_batches_across_ranks) == world_size
+                expert_slice = slice(expert_start_index, expert_start_index + num_experts_per_rank)
+            
+            # Rearrange to [n_experts, B, capacity, n_embd]
+            from einops import rearrange
+            x = rearrange(x, 'b e n d -> e b n d')
+            
+            if is_distributed:
+                # Pack and split by rank
+                x, expert_batch_packed_shape = pack_one(x, '* n d')
+                x = x.split(num_experts_batches_across_ranks, dim=0)
+                x, experts_per_rank_sizes = split_by_rank(x)
+                
+                if num_experts_per_rank > 0:
+                    x = rearrange(x, '(e b) n d -> e b n d', e=num_experts_per_rank)
+                else:
+                    x = x.reshape(self.n_exp, *x.shape)
+            
+            # Get expert parameters for this rank
+            c_fc_slice = self.c_fc[expert_slice]
+            c_proj_slice = self.c_proj[expert_slice]
+            c_fc_bias_slice = self.c_fc_bias[expert_slice] if self.c_fc_bias is not None else None
+            c_proj_bias_slice = self.c_proj_bias[expert_slice] if self.c_proj_bias is not None else None
+            
+            # Apply expert networks
+            if self.norm is not None:
+                x = self.norm(x)
+            
+            # First linear: [n_experts_local, B, capacity, n_embd] -> [n_experts_local, B, capacity, dim_hidden*2]
+            x = torch.bmm(x.view(-1, x.shape[-2], x.shape[-1]), c_fc_slice.view(-1, c_fc_slice.shape[-2], c_fc_slice.shape[-1]))
+            x = x.view(c_fc_slice.shape[0], -1, x.shape[-2], x.shape[-1])
+            
+            if c_fc_bias_slice is not None:
+                x = x + c_fc_bias_slice.unsqueeze(1)
+            
+            # GEGLU activation
+            x = self.geglu(x)
+            
+            # Second linear: [n_experts_local, B, capacity, dim_hidden] -> [n_experts_local, B, capacity, n_embd]
+            x = torch.bmm(x.view(-1, x.shape[-2], x.shape[-1]), c_proj_slice.view(-1, c_proj_slice.shape[-2], c_proj_slice.shape[-1]))
+            x = x.view(c_proj_slice.shape[0], -1, x.shape[-2], x.shape[-1])
+            
+            if c_proj_bias_slice is not None:
+                x = x + c_proj_bias_slice.unsqueeze(1)
+            
+            # All-gather results if distributed
+            if is_distributed:
+                x = rearrange(x, 'e b n d -> (e b) n d')
+                x, _ = self.all_gather(x, sizes=experts_per_rank_sizes)
+                x = unpack_one(x, expert_batch_packed_shape, '* n d')
+            
+            # Rearrange back to [B, n_experts, capacity, n_embd]
+            x = rearrange(x, 'e b n d -> b e n d')
+            
+            if is_distributed:
+                # Split back to per-rank batches
+                x = x.split(batch_sizes.tolist())
+                x, _ = split_by_rank(x)
+                
+                # Remove padding
+                x = x[..., :seq_len, :]
+            
+            assert x.shape == shape
+            return self.dropout(x)
         else:
             # Standard MLP forward pass
             x = self.c_fc(x)
             x = self.activation(x)
             x = self.c_proj(x)
-        
-        return self.dropout(x)
+            return self.dropout(x)
 
 
 class Block(torch.nn.Module):
@@ -143,7 +351,10 @@ class Block(torch.nn.Module):
         self.is_moe = hasattr(config, 'n_experts') and config.n_experts > 1
         if self.is_moe:
             self.router = Router(config) 
-            self.experts = MLP(config)   
+            # Enable distributed training and variable sequence length handling
+            is_distributed = getattr(config, 'expert_distributed', None)
+            allow_var_seq_len = getattr(config, 'allow_var_seq_len', False)
+            self.experts = MLP(config, is_distributed=is_distributed, allow_var_seq_len=allow_var_seq_len)   
             self.config = config 
         else:
             self.mlp = MLP(config) 
@@ -154,41 +365,21 @@ class Block(torch.nn.Module):
         x_ln = self.ln_2(x) 
         
         if self.is_moe:
-            batch_size, seq_len, hidden_dim = x_ln.shape
-            num_tokens = batch_size * seq_len
-            x_flat = x_ln.reshape(num_tokens, hidden_dim)
-
-            # Route tokens to experts
-            used_capacity, cb_weight, sec_mask = self.router(x_ln)
+            # Route tokens to experts using threshold-based routing
+            dispatch_tensor, combine_tensor = self.router(x_ln)
+            # dispatch_tensor: [B, T, n_experts, capacity], combine_tensor: [B, T, n_experts, capacity]
             
-            # Prepare inputs for experts
-            expert_inputs = torch.zeros(
-                self.config.n_experts, 
-                self.router._get_capacity(num_tokens), 
-                hidden_dim, 
-                device=x.device, 
-                dtype=x.dtype
-            )
+            # Dispatch: einsum('b n d, b n e c -> b e c d', x, dispatch_tensor)
+            # This efficiently routes tokens to experts
+            expert_inputs = torch.einsum('b n d, b n e c -> b e c d', x_ln, dispatch_tensor)
+            # expert_inputs: [B, n_experts, capacity, n_embd]
             
-            # Extract token indices for each expert
-            for expert_idx in range(self.config.n_experts):
-                token_indices, slot_indices = sec_mask[:, expert_idx].nonzero(as_tuple=True)
-                if token_indices.numel() > 0:
-                    expert_inputs[expert_idx, slot_indices] = x_flat[token_indices]
-            
-            # Process inputs through experts
+            # Process through experts with distributed support
             expert_outputs = self.experts(expert_inputs)
+            # expert_outputs: [B, n_experts, capacity, n_embd]
             
-            # Combine expert outputs weighted by router probabilities
-            combined_output = torch.zeros(num_tokens, hidden_dim, device=x.device, dtype=x.dtype)
-            
-            for expert_idx in range(self.config.n_experts):
-                token_indices, slot_indices = sec_mask[:, expert_idx].nonzero(as_tuple=True)
-                if token_indices.numel() > 0:
-                    combined_output[token_indices] += cb_weight[token_indices, expert_idx, slot_indices].unsqueeze(-1) * expert_outputs[expert_idx, slot_indices]
-            
-            # Reshape output back to original dimensions
-            x_mlp_out = combined_output.reshape(batch_size, seq_len, hidden_dim)
+            # Combine: einsum('b e c d, b n e c -> b n d', expert_outputs, combine_tensor)
+            x_mlp_out = torch.einsum('b e c d, b n e c -> b n d', expert_outputs, combine_tensor)
         else:
             x_mlp_out = self.mlp(x_ln)
         
@@ -323,20 +514,34 @@ class Router(nn.Module):
 
         self.top_k = config.top_k 
         self.n_exp = config.n_experts
-        assert self.top_k >= 1 and self.top_k <= config.n_experts
+        assert self.top_k >= 2, 'must be 2 or more experts'
+        assert self.top_k <= config.n_experts
         
+        self.eps = 1e-9
         self.use_noisy_top_k = getattr(config, 'use_noisy_top_k', False)
         self.train_capacity_factor = getattr(config, 'train_capacity', 1.25) 
         self.eval_capacity_factor = getattr(config, 'eval_capacity', 2.0)   
         self.min_capacity = getattr(config, 'min_capacity', 4)
         self.router_use_full_prec = getattr(config, 'router_use_full_prec', False)
+        self.straight_through_dispatch_tensor = getattr(config, 'straight_through_dispatch_tensor', True)
 
         self.use_aux_loss = getattr(config, 'use_aux_loss', False)
         self.use_router_z_loss = getattr(config, 'use_router_z_loss', False)
         
+        # Threshold-based routing (default 0.2 for top-2, can be tuple for top-k)
+        threshold_train = getattr(config, 'threshold_train', 0.2)
+        threshold_eval = getattr(config, 'threshold_eval', 0.2)
+        top_n_minus_1 = self.top_k - 1
+        
+        threshold_train = cast_tuple(threshold_train, top_n_minus_1)
+        threshold_eval = cast_tuple(threshold_eval, top_n_minus_1)
+        
+        self.register_buffer('threshold_train', torch.tensor([self.eps, *threshold_train]))
+        self.register_buffer('threshold_eval', torch.tensor([self.eps, *threshold_eval]))
+        self.register_buffer('zero', torch.zeros((1,)), persistent=False)
+        
         # Router weights
         self.w_g = nn.Linear(config.n_embd, config.n_experts, bias=False)
-        self.w_noise = nn.Linear(config.n_embd, config.n_experts, bias=False) if self.use_noisy_top_k else None
     
     def forward(self, x):
         device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -345,74 +550,125 @@ class Router(nn.Module):
         with ctx:
             B, T, hidden_dim = x.shape
             num_tokens = B * T
-            x_flat = x.reshape(num_tokens, hidden_dim)
-
-            # Get router logits
-            logits = self.w_g(x_flat)
+            group_size = T  # sequence length
             
-            # Apply noise during training if enabled
+            # Get threshold and capacity factor based on training/eval
+            suffix = 'train' if self.training else 'eval'
+            threshold = getattr(self, f'threshold_{suffix}')
+            capacity_factor = self.train_capacity_factor if self.training else self.eval_capacity_factor
+            
+            # Calculate expert capacity
+            expert_capacity = min(group_size, int((group_size * capacity_factor) / self.n_exp))
+            expert_capacity = max(expert_capacity, self.min_capacity)
+            expert_capacity_f = float(expert_capacity)
+            
+            # Get router logits
+            gate_logits = self.w_g(x)  # [B, T, n_experts]
+            
+            # Apply Gumbel noise during training if enabled
+            maybe_noised_gate_logits = gate_logits
             if self.use_noisy_top_k and self.training:
-                noise_logits = self.w_noise(x_flat) 
-                noise = torch.randn_like(noise_logits) * F.softplus(noise_logits)
-                logits = logits + noise
-
+                noise = gumbel_noise(gate_logits)
+                maybe_noised_gate_logits = gate_logits + noise
+            
             # Router z-loss to stabilize router logits
             if self.use_router_z_loss and self.training:
-                z_loss = torch.mean(torch.logsumexp(logits, dim=-1).pow(2))
-                MANAGER.add_router_z_loss(z_loss)
-
-            # Get top-k experts per token
-            top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1)
+                router_z_loss = torch.logsumexp(gate_logits, dim=-1)
+                router_z_loss = torch.square(router_z_loss)
+                router_z_loss = router_z_loss.mean()
+                MANAGER.add_router_z_loss(router_z_loss)
             
-            # Create a mask for routing
-            router_probs = torch.full_like(logits, float('-inf'))
-            router_probs.scatter_(-1, top_k_indices, top_k_logits)
-            router_probs = F.softmax(router_probs, dim=-1)
-
-            # Calculate auxiliary load balancing loss if enabled
+            # Get raw gates (probabilities)
+            raw_gates = maybe_noised_gate_logits.softmax(dim=-1)  # [B, T, n_experts]
+            
+            # Find top-k experts per position
+            top_k_values, top_k_indices = raw_gates.topk(self.top_k, dim=-1)  # [B, T, top_k]
+            
+            # Move top-k dimension to first: [top_k, B, T]
+            gates = top_k_values.permute(2, 0, 1)  # [top_k, B, T]
+            gate_indices = top_k_indices.permute(2, 0, 1)  # [top_k, B, T]
+            
+            # Create masks
+            one_hot_gate_indices = F.one_hot(gate_indices, self.n_exp)  # [top_k, B, T, n_experts]
+            mask = one_hot_gate_indices.float()
+            mask_1 = mask[0]  # needed for balancing loss
+            
+            # Normalize top-k gate scores
+            denom = gates.sum(dim=0, keepdim=True).clamp(min=self.eps)  # [1, B, T]
+            gates = gates / denom  # [top_k, B, T]
+            
+            # Threshold-based probabilistic routing
+            # Route to second expert and beyond with probability min(1., score / threshold)
+            probs = torch.zeros_like(gates).uniform_(0., 1.)  # [top_k, B, T]
+            threshold_expanded = threshold.view(-1, 1, 1)  # [top_k, 1, 1]
+            should_route = probs < (gates / threshold_expanded.clamp(min=self.eps))  # [top_k, B, T]
+            
+            # Always route to first expert
+            should_route[0, ...] = True
+            
+            # Apply routing mask
+            mask = mask * should_route.unsqueeze(-1)  # [top_k, B, T, n_experts]
+            
+            # Compute positions within expert buffers using exclusive cumsum
+            mask_cumsum = cumsum_exclusive(mask, dim=-2)  # [top_k, B, T, n_experts]
+            
+            # Compute assignment to experts
+            positions = []
+            prev_expert_count = torch.zeros(B, 1, self.n_exp, device=x.device, dtype=x.dtype)
+            
+            for n in range(self.top_k):
+                position_in_expert = (mask_cumsum[n] + prev_expert_count) * mask[n]
+                
+                # Remove elements that don't fit capacity
+                mask[n] = mask[n] * (position_in_expert < expert_capacity_f).float()
+                
+                # Count examples going to each expert for next iteration
+                prev_expert_count = mask[n].sum(dim=1, keepdim=True) + prev_expert_count
+                
+                # Get position indices [B, T]
+                position_in_expert = position_in_expert.sum(dim=-1)  # [B, T]
+                positions.append(position_in_expert)
+            
+            positions = torch.stack(positions)  # [top_k, B, T]
+            
+            # Flatten mask: [top_k, B, T] - mostly ones, zeros where didn't fit
+            mask_flat = mask.sum(dim=-1)  # [top_k, B, T]
+            
+            # Weighted assignment
+            gates = gates * mask_flat  # [top_k, B, T]
+            
+            # Create combine tensor: [B, T, n_experts, expert_capacity]
+            # Using einsum-like operations: k b n, k b n, k b n e, k b n c -> b n e c
+            pos_one_hot_all = safe_one_hot(positions.long(), expert_capacity)  # [top_k, B, T, expert_capacity]
+            
+            # Expand dimensions for broadcasting
+            gates_expanded = gates.unsqueeze(-1).unsqueeze(-1)  # [top_k, B, T, 1, 1]
+            mask_flat_expanded = mask_flat.unsqueeze(-1).unsqueeze(-1)  # [top_k, B, T, 1, 1]
+            one_hot_gate_expanded = one_hot_gate_indices.unsqueeze(-1)  # [top_k, B, T, n_experts, 1]
+            pos_one_hot_expanded = pos_one_hot_all.unsqueeze(-2)  # [top_k, B, T, 1, expert_capacity]
+            
+            # Multiply all components: gates * mask_flat * one_hot_gate * pos_one_hot
+            combine_tensor_k = gates_expanded * mask_flat_expanded * one_hot_gate_expanded * pos_one_hot_expanded
+            # combine_tensor_k: [top_k, B, T, n_experts, expert_capacity]
+            
+            # Sum over top_k dimension
+            combine_tensor = combine_tensor_k.sum(dim=0)  # [B, T, n_experts, expert_capacity]
+            
+            # Dispatch tensor (boolean version of combine_tensor)
+            dispatch_tensor = combine_tensor.bool().type(x.dtype)
+            
+            # Straight-through estimator for gradients
+            if self.straight_through_dispatch_tensor:
+                dispatch_tensor = dispatch_tensor + combine_tensor - combine_tensor.detach()
+            
+            # Balance loss
             if self.use_aux_loss and self.training:
-                # Calculate fraction of tokens routed to each expert
-                tokens_per_expert_fraction = F.one_hot(top_k_indices, num_classes=self.n_exp).sum(dim=1).float().mean(dim=0)
-                # Calculate fraction of router probability assigned to each expert
-                prob_per_expert_mean = router_probs.mean(dim=0)
-                # Compute auxiliary loss
-                aux_loss = self.n_exp * torch.sum(tokens_per_expert_fraction * prob_per_expert_mean)
-                MANAGER.add_aux_loss(aux_loss)
-
-            # Calculate capacity
-            capacity = self._get_capacity(num_tokens)
+                density_1 = mask_1.mean(dim=(0, 1))  # [n_experts]
+                density_1_proxy = raw_gates.mean(dim=(0, 1))  # [n_experts]
+                balance_loss = (density_1_proxy * density_1).mean() * float(self.n_exp ** 2)
+                MANAGER.add_aux_loss(balance_loss)
             
-            # Create expert masks and weights
-            # [num_tokens, n_experts, capacity]
-            exp_mask = F.one_hot(top_k_indices, num_classes=self.n_exp)
-            exp_mask = exp_mask.view(num_tokens, self.top_k, self.n_exp)
-            exp_mask = exp_mask.permute(1, 0, 2)  # [top_k, num_tokens, n_experts]
-
-            # Calculate the position of each token in each expert's buffer
-            # and ensure we respect capacity constraints
-            exp_rank = exp_mask.reshape(self.top_k * num_tokens, self.n_exp)
-            exp_rank = torch.cumsum(exp_rank, dim=0) - 1
-            exp_rank = exp_rank.reshape(self.top_k, num_tokens, self.n_exp)
-
-            # Mask out tokens that exceed capacity
-            exp_mask = exp_mask * torch.lt(exp_rank, capacity)
-            used_capacity = torch.sum(exp_mask, dim=(0, 1))  # [n_experts]
-
-            # Calculate final rank for selected experts
-            exp_rank = torch.sum(exp_mask * exp_rank, dim=-1)  # [top_k, num_tokens]
-
-            # Use router probabilities to weight experts
-            router_probs = router_probs.view(num_tokens, self.n_exp)[None, :]  # [1, num_tokens, n_experts]
-            exp_weights = exp_mask * router_probs  # [top_k, num_tokens, n_experts]
-
-            # Create one-hot encoding of ranks
-            exp_rank_sc = F.one_hot(exp_rank.long(), num_classes=capacity)  # [top_k, num_tokens, capacity]
-
-            # Combine weights and ranks to create final weight tensor
-            cb_weight = torch.sum(exp_weights.unsqueeze(3) * exp_rank_sc.unsqueeze(2), dim=0)  # [num_tokens, n_experts, capacity]
-            sec_mask = cb_weight.bool()  # [num_tokens, n_experts, capacity]
-
-            return used_capacity, cb_weight, sec_mask
+            return dispatch_tensor, combine_tensor
     
     def _get_capacity(self, tokens_per_batch):
         capacity_factor = self.train_capacity_factor if self.training else self.eval_capacity_factor

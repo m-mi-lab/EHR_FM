@@ -30,3 +30,13 @@ min_capacity: 2
 
 use_noisy_top_k: false
 router_use_full_prec: false
+
+# Distributed expert parallelism settings
+expert_distributed: null  # null = auto-detect, true/false to override
+allow_var_seq_len: false  # allow variable sequence lengths in distributed mode
+expert_hidden_mult: 4     # hidden layer multiplier for experts
+expert_mult_bias: true    # use multiplicative bias in GEGLU
+expert_prenorm: false     # apply RMSNorm before expert
+threshold_train: 0.2      # routing threshold during training
+threshold_eval: 0.2       # routing threshold during eval
+straight_through_dispatch_tensor: true  # use straight-through estimator for gradients

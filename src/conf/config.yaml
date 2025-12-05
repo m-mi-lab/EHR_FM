@@ -16,5 +16,5 @@ hydra:
 project_name: EHR_FM
 seed: 42 
 
-world_size: 1 # reduced for memory efficiency
+world_size: auto # auto-detect GPUs, or set to specific number (1 for single GPU)
 
