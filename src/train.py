@@ -25,7 +25,7 @@ from src.tokenizer.datasets import TimelineDataset
 from src.tokenizer.vocabulary import Vocabulary 
 from src.metrics import estimate_loss
 from src.manager import MANAGER # MOEManager instance
-from model import GPT2LMNoBiasModel, ModelOutput
+from src.model import GPT2LMNoBiasModel, ModelOutput
 
 # ModelOutput is already defined in model.py, no need to redefine here if imported
 # ModelOutput = namedtuple("ModelOutput", ["loss", "logits", "aux_loss", "router_z_loss"])

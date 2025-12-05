@@ -1,0 +1,17 @@
+# Mortality Prediction Simulation - 20 Trajectories
+# Configuration for monolith_million model
+data_dir: "/workspace/ehr_stuff/EHR_FM/data/tokenized_datasets/mimic_train"
+output_dir: "/workspace/ehr_stuff/EHR_FM/scripts/mortality_20traj_results"
+num_patients: 1000  # Evaluate on 1000 patients
+
+target_death_patients: 500  # Balanced dataset (500 death, 500 discharge)
+num_trajectories_per_patient: 20  # 20 repetitions per patient
+
+max_tokens: 1000  # Safety limit - trajectories stop at death/discharge token
+temperature: 1.0
+base_seed: 42
+
+models:
+  "monolith_million":
+    path: "/workspace/ehr_stuff/EHR_FM/outputs/2025-11-17/19-21-21_model=gpt2_small_monolith,train=monolith_million,world_size=auto/ckpt_92000.pt"
+

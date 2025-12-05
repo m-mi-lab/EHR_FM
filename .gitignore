@@ -1,6 +1,7 @@
 data/*
 outputs/
 outs/
+mlflow_data/
 __pycache__/
  *.pyc
 ehr_fm.egg-info/

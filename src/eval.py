@@ -21,7 +21,7 @@ import json # For saving summary
 from src.tokenizer.constants import SpecialToken as ST
 from src.tokenizer.datasets import TimelineDataset
 from src.tokenizer.vocabulary import Vocabulary
-from model import GPT2LMNoBiasModel, ModelOutput # Ensure 'model' is in src or PYTHONPATH
+from src.model import GPT2LMNoBiasModel, ModelOutput
 from src.metrics import top_k_accuracy, top_k_pr, top_k_acc_special, top_k_pr_special
 
 def get_memory_usage(device):

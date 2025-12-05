@@ -121,7 +121,7 @@ The training system uses Hydra configuration management. You can override defaul
 ```bash
 # Run with different model and training configurations
 python3 -m src.train model=gpt2_small_8exp train=8_exp world_size=1
-python3 -m src.train model=gpt2_small_4exp train=4_exp world_size=1
+python3 -m src.train model=gpt2_small_4exp train=4_exp world_size=auto
 ```
 
 ### Available Configurations
