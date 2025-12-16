@@ -1,11 +1,11 @@
 # train loop params
 max_iters: 200000
 eval_interval: 2000   
-eval_iters: 200      # batches for evaluation
+eval_iters: 100      # batches for evaluation (reduced to save memory)
 log_interval: 10       
 save_checkpoints: True 
 
-resume_from_checkpoint: null # not required now
+resume_from_checkpoint: /workspace/outputs/2025-12-05/16-12-39_model=gpt2_small_2exp,train=2_exp,world_size=auto/best_model.pt
 
 # Optimizer 
 lr: 6e-4             

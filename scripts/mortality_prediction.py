@@ -180,9 +180,43 @@ def generate_single_trajectory(model, context, vocab_size, device, death_token_i
     }
 
 
+def save_patient_cache(patients_data, cache_path):
+    """Save patient data to cache file."""
+    cache_data = {
+        'patients': [
+            {
+                'context': p['context'].cpu().tolist() if isinstance(p['context'], torch.Tensor) else p['context'],
+                'ground_truth_outcome': p['ground_truth_outcome'],
+                'dataset_idx': p['dataset_idx']
+            }
+            for p in patients_data
+        ]
+    }
+    with open(cache_path, 'w') as f:
+        json.dump(cache_data, f)
+    print(f"💾 Saved patient cache to: {cache_path}")
+
+
+def load_patient_cache(cache_path):
+    """Load patient data from cache file."""
+    with open(cache_path, 'r') as f:
+        cache_data = json.load(f)
+    
+    patients = [
+        {
+            'context': torch.tensor(p['context']),
+            'ground_truth_outcome': p['ground_truth_outcome'],
+            'dataset_idx': p['dataset_idx']
+        }
+        for p in cache_data['patients']
+    ]
+    print(f"✅ Loaded {len(patients)} patients from cache: {cache_path}")
+    return patients
+
+
 def run_mortality_prediction_for_patient(model, context, ground_truth_outcome, vocab, device, 
                                          num_trajectories=10, max_tokens=500, temperature=1.0,
-                                         base_seed=42):
+                                         base_seed=42, discard_unfinished=False):
     """
     Run mortality prediction for a single patient using multiple trajectories.
     
@@ -236,11 +270,16 @@ def run_mortality_prediction_for_patient(model, context, ground_truth_outcome, v
             no_outcome_count += 1
     
     # Calculate prediction probabilities
-    total_with_outcome = death_count + discharge_count
+    if discard_unfinished:
+        # Only count trajectories with outcomes for probability calculation
+        total_for_prob = death_count + discharge_count
+    else:
+        # Count all trajectories
+        total_for_prob = num_trajectories
     
-    if total_with_outcome > 0:
-        mortality_probability = death_count / total_with_outcome
-        survival_probability = discharge_count / total_with_outcome
+    if total_for_prob > 0:
+        mortality_probability = death_count / total_for_prob
+        survival_probability = discharge_count / total_for_prob
     else:
         mortality_probability = 0.0
         survival_probability = 0.0
@@ -277,7 +316,8 @@ def run_mortality_prediction_for_patient(model, context, ground_truth_outcome, v
 def run_mortality_prediction_simulation(model, dataset, vocab, device, model_cfg,
                                         num_patients=100, num_trajectories_per_patient=10,
                                         max_tokens=500, temperature=1.0, base_seed=42,
-                                        target_death_patients=None):
+                                        target_death_patients=None, cached_patients=None,
+                                        discard_unfinished=False):
     """
     Run mortality prediction simulation on multiple patients.
     
@@ -321,12 +361,19 @@ def run_mortality_prediction_simulation(model, dataset, vocab, device, model_cfg
     # Iterate through patients
     print(f"\nProcessing {num_patients} patients...")
     
-    patients_processed = 0
-    death_patients_found = 0
-    discharge_patients_found = 0
-    dataset_idx = 0
-    
-    with tqdm(total=num_patients, desc="Patients") as pbar:
+    # Use cached patients if provided, otherwise load from dataset
+    if cached_patients is not None:
+        print(f"📦 Using cached patient data ({len(cached_patients)} patients)")
+        patients_to_process = cached_patients
+        new_patient_cache = None
+    else:
+        print(f"📋 Loading patients from dataset...")
+        patients_to_process = []
+        patients_processed = 0
+        death_patients_found = 0
+        discharge_patients_found = 0
+        dataset_idx = 0
+        
         while patients_processed < num_patients and dataset_idx < len(dataset):
             try:
                 # Get patient data from dataset
@@ -358,10 +405,39 @@ def run_mortality_prediction_simulation(model, dataset, vocab, device, model_cfg
                     if ground_truth_outcome == ST.DEATH:
                         if death_patients_found >= target_death_patients:
                             continue  # Already have enough death patients
+                        death_patients_found += 1
                     else:  # DISCHARGE
                         target_discharge = num_patients - target_death_patients
                         if discharge_patients_found >= target_discharge:
                             continue  # Already have enough discharge patients
+                        discharge_patients_found += 1
+                
+                # Store patient data for caching
+                patients_to_process.append({
+                    'context': context_tensor,
+                    'ground_truth_outcome': ground_truth_outcome,
+                    'dataset_idx': dataset_idx - 1,
+                    'patient_id': metadata.get('patient_id', dataset_idx - 1),
+                    'hadm_id': metadata.get('hadm_id', None)
+                })
+                patients_processed += 1
+                
+            except Exception as e:
+                print(f"⚠️  Error loading patient {dataset_idx}: {e}")
+                continue
+        
+        new_patient_cache = patients_to_process
+        print(f"✅ Loaded {len(patients_to_process)} patients from dataset")
+    
+    # Now run predictions on all patients
+    patients_processed = 0
+    death_patients_found = 0
+    
+    with tqdm(total=len(patients_to_process), desc="Patients") as pbar:
+        for patient_data in patients_to_process:
+            try:
+                context_tensor = patient_data['context']
+                ground_truth_outcome = patient_data['ground_truth_outcome']
                 
                 # Run prediction for this patient
                 patient_result = run_mortality_prediction_for_patient(
@@ -373,12 +449,13 @@ def run_mortality_prediction_simulation(model, dataset, vocab, device, model_cfg
                     num_trajectories=num_trajectories_per_patient,
                     max_tokens=max_tokens,
                     temperature=temperature,
-                    base_seed=base_seed + patients_processed * 1000  # Unique seed per patient
+                    base_seed=base_seed + patients_processed * 1000,  # Unique seed per patient
+                    discard_unfinished=discard_unfinished
                 )
                 
                 # Add metadata
-                patient_result['patient_id'] = metadata.get('patient_id', dataset_idx)
-                patient_result['hadm_id'] = metadata.get('hadm_id', None)
+                patient_result['patient_id'] = patient_data.get('patient_id', patients_processed)
+                patient_result['hadm_id'] = patient_data.get('hadm_id', None)
                 patient_result['context_length'] = len(context_tensor)
                 
                 patient_results.append(patient_result)
@@ -412,7 +489,8 @@ def run_mortality_prediction_simulation(model, dataset, vocab, device, model_cfg
             'max_tokens': max_tokens,
             'temperature': temperature,
             'base_seed': base_seed
-        }
+        },
+        'new_patient_cache': new_patient_cache  # For caching newly loaded patients
     }
 
 
@@ -1397,6 +1475,10 @@ def main():
                         help='Generate plots after running simulation')
     parser.add_argument('--plot-only', action='store_true',
                         help='Only generate plots from existing results (skip simulation)')
+    parser.add_argument('--patient-cache', type=str, default=None,
+                        help='Path to save/load cached patient data (avoids reprocessing dataset)')
+    parser.add_argument('--discard-unfinished-trajectories', action='store_true',
+                        help='Exclude trajectories without death/discharge outcome from mortality probability calculation')
     
     args = parser.parse_args()
     
@@ -1471,8 +1553,14 @@ def main():
     )
     print(f"✅ Dataset loaded. Size: {len(dataset)}")
     
+    # Load or prepare patient cache
+    cached_patients = None
+    if args.patient_cache and Path(args.patient_cache).exists():
+        cached_patients = load_patient_cache(args.patient_cache)
+    
     # Evaluate each model
     all_model_results = {}
+    patient_cache_to_save = None
     
     for model_name, model_path in models_to_eval.items():
         print(f"\n{'='*70}")
@@ -1497,8 +1585,14 @@ def main():
             max_tokens=max_tokens,
             temperature=temperature,
             base_seed=base_seed,
-            target_death_patients=target_death_patients
+            target_death_patients=target_death_patients,
+            cached_patients=cached_patients,
+            discard_unfinished=args.discard_unfinished_trajectories
         )
+        
+        # Save patient cache from first model if not already cached
+        if patient_cache_to_save is None and results.get('new_patient_cache') is not None:
+            patient_cache_to_save = results['new_patient_cache']
         
         # Print statistics
         print_statistics(results['statistics'])
@@ -1512,6 +1606,10 @@ def main():
         # Clear GPU memory
         del model
         torch.cuda.empty_cache()
+    
+    # Save patient cache if we created one
+    if args.patient_cache and patient_cache_to_save is not None:
+        save_patient_cache(patient_cache_to_save, args.patient_cache)
     
     # Print comparison if multiple models
     if len(all_model_results) > 1:
