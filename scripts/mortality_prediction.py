@@ -101,20 +101,6 @@ def generate_single_trajectory(model, context, vocab_size, device, death_token_i
                                max_tokens=500, temperature=1.0, seed=None):
     """
     Generate a single trajectory by sampling tokens until death or discharge.
-    
-    Args:
-        model: The language model
-        context: Initial context tensor
-        vocab_size: Size of vocabulary (for masking padding tokens)
-        device: Device to run on
-        death_token_id: Token ID for death
-        discharge_token_id: Token ID for discharge
-        max_tokens: Maximum tokens to generate (safety limit, default 500)
-        temperature: Sampling temperature
-        seed: Random seed for this trajectory
-    
-    Returns:
-        trajectory: dict with tokens, probabilities, and outcome info
     """
     if seed is not None:
         torch.manual_seed(seed)
@@ -134,28 +120,21 @@ def generate_single_trajectory(model, context, vocab_size, device, death_token_i
             if current_context.size(0) > 512:
                 current_context = current_context[-512:]
             
-            # Get model prediction
             input_ids = current_context.unsqueeze(0).to(device)
             output = model(input_ids)
             logits = output.logits[0, -1, :]  # Last position
             
-            # Apply temperature
             logits = logits / temperature
-            
-            # Mask padding tokens
             logits = logits[:vocab_size]
             
-            # Get probabilities
             probs = torch.softmax(logits, dim=-1)
             
-            # Sample next token
             next_token = torch.multinomial(probs, num_samples=1).item()
             next_prob = probs[next_token].item()
             
             trajectory_tokens.append(next_token)
             trajectory_probs.append(next_prob)
             
-            # Check if this is death or discharge token - STOP when we hit one
             if next_token == death_token_id:
                 outcome_token = ST.DEATH
                 outcome_prob = next_prob
@@ -167,7 +146,6 @@ def generate_single_trajectory(model, context, vocab_size, device, death_token_i
                 outcome_position = step
                 break  # Stop trajectory at outcome
             
-            # Add token to context for next prediction
             current_context = torch.cat([current_context, torch.tensor([next_token])])
     
     return {
@@ -219,20 +197,6 @@ def run_mortality_prediction_for_patient(model, context, ground_truth_outcome, v
                                          base_seed=42, discard_unfinished=False):
     """
     Run mortality prediction for a single patient using multiple trajectories.
-    
-    Args:
-        model: The language model
-        context: Context tensor up to admission
-        ground_truth_outcome: True outcome (DEATH or DISCHARGE)
-        vocab: Vocabulary
-        device: Device
-        num_trajectories: Number of trajectories to run (default 10)
-        max_tokens: Max tokens per trajectory (default 500, safety limit)
-        temperature: Sampling temperature
-        base_seed: Base seed for reproducibility
-    
-    Returns:
-        prediction_result: dict with trajectories and prediction statistics
     """
     vocab_size = len(vocab)
     death_token_id = vocab.stoi.get(ST.DEATH, -1)
@@ -269,12 +233,9 @@ def run_mortality_prediction_for_patient(model, context, ground_truth_outcome, v
         else:
             no_outcome_count += 1
     
-    # Calculate prediction probabilities
     if discard_unfinished:
-        # Only count trajectories with outcomes for probability calculation
         total_for_prob = death_count + discharge_count
     else:
-        # Count all trajectories
         total_for_prob = num_trajectories
     
     if total_for_prob > 0:
@@ -284,7 +245,7 @@ def run_mortality_prediction_for_patient(model, context, ground_truth_outcome, v
         mortality_probability = 0.0
         survival_probability = 0.0
     
-    # Determine predicted outcome (majority vote)
+    # only for threshold based metrics --- confusion matrix, accuracy
     if death_count > discharge_count:
         predicted_outcome = ST.DEATH
         prediction_confidence = mortality_probability
@@ -295,7 +256,6 @@ def run_mortality_prediction_for_patient(model, context, ground_truth_outcome, v
         predicted_outcome = None  # Tie
         prediction_confidence = 0.5
     
-    # Check if prediction is correct
     is_correct = (predicted_outcome == ground_truth_outcome)
     
     return {
@@ -320,22 +280,6 @@ def run_mortality_prediction_simulation(model, dataset, vocab, device, model_cfg
                                         discard_unfinished=False):
     """
     Run mortality prediction simulation on multiple patients.
-    
-    Args:
-        model: The language model
-        dataset: HospitalMortalityDataset
-        vocab: Vocabulary
-        device: Device
-        model_cfg: Model configuration
-        num_patients: Number of patients to evaluate (default 100)
-        num_trajectories_per_patient: Number of trajectories per patient (default 10)
-        max_tokens: Max tokens per trajectory (default 500)
-        temperature: Sampling temperature
-        base_seed: Base random seed
-        target_death_patients: Target number of death patients (None = no balancing)
-    
-    Returns:
-        results: dict with all patient predictions and aggregate statistics
     """
     print(f"\n{'='*70}")
     print(f"MORTALITY PREDICTION SIMULATION")
@@ -351,17 +295,14 @@ def run_mortality_prediction_simulation(model, dataset, vocab, device, model_cfg
     
     patient_results = []
     
-    # Get token IDs
     death_token_id = vocab.stoi.get(ST.DEATH, -1)
     discharge_token_id = vocab.stoi.get(ST.DISCHARGE, -1)
     
     print(f"\nDeath token: {ST.DEATH} (ID: {death_token_id})")
     print(f"Discharge token: {ST.DISCHARGE} (ID: {discharge_token_id})")
     
-    # Iterate through patients
     print(f"\nProcessing {num_patients} patients...")
     
-    # Use cached patients if provided, otherwise load from dataset
     if cached_patients is not None:
         print(f"📦 Using cached patient data ({len(cached_patients)} patients)")
         patients_to_process = cached_patients
@@ -376,43 +317,41 @@ def run_mortality_prediction_simulation(model, dataset, vocab, device, model_cfg
         
         while patients_processed < num_patients and dataset_idx < len(dataset):
             try:
-                # Get patient data from dataset
                 context_tensor, metadata = dataset[dataset_idx]
                 dataset_idx += 1
                 
-                # Extract ground truth outcome
                 ground_truth = metadata.get('expected', None)
                 if ground_truth is None:
                     continue
                 
-                # Filter context to remove padding
+                # within max_tokens limit?
+                true_token_dist = metadata.get('true_token_dist', None)
+                if true_token_dist is not None and true_token_dist > max_tokens:
+                    continue
+                
                 context_tensor = context_tensor[context_tensor >= 0]
                 
                 if len(context_tensor) < 5:
                     continue
                 
-                # Determine ground truth outcome
                 if ground_truth == ST.DEATH:
                     ground_truth_outcome = ST.DEATH
                 elif ground_truth == ST.DISCHARGE:
                     ground_truth_outcome = ST.DISCHARGE
                 else:
-                    continue  # Skip if not death or discharge
+                    continue
                 
-                # Class balancing logic
                 if target_death_patients is not None:
-                    # Check if we should skip this patient based on balancing
                     if ground_truth_outcome == ST.DEATH:
                         if death_patients_found >= target_death_patients:
-                            continue  # Already have enough death patients
+                            continue
                         death_patients_found += 1
                     else:  # DISCHARGE
                         target_discharge = num_patients - target_death_patients
                         if discharge_patients_found >= target_discharge:
-                            continue  # Already have enough discharge patients
+                            continue
                         discharge_patients_found += 1
                 
-                # Store patient data for caching
                 patients_to_process.append({
                     'context': context_tensor,
                     'ground_truth_outcome': ground_truth_outcome,
@@ -429,9 +368,9 @@ def run_mortality_prediction_simulation(model, dataset, vocab, device, model_cfg
         new_patient_cache = patients_to_process
         print(f"✅ Loaded {len(patients_to_process)} patients from dataset")
     
-    # Now run predictions on all patients
     patients_processed = 0
     death_patients_found = 0
+    discharge_patients_found = 0
     
     with tqdm(total=len(patients_to_process), desc="Patients") as pbar:
         for patient_data in patients_to_process:
@@ -439,7 +378,6 @@ def run_mortality_prediction_simulation(model, dataset, vocab, device, model_cfg
                 context_tensor = patient_data['context']
                 ground_truth_outcome = patient_data['ground_truth_outcome']
                 
-                # Run prediction for this patient
                 patient_result = run_mortality_prediction_for_patient(
                     model=model,
                     context=context_tensor,
@@ -470,7 +408,7 @@ def run_mortality_prediction_simulation(model, dataset, vocab, device, model_cfg
                 pbar.update(1)
                 
             except Exception as e:
-                print(f"\nError processing patient {dataset_idx}: {e}")
+                print(f"\nError processing patient: {e}")
                 continue
     
     print(f"\n✅ Processed {patients_processed} patients")
@@ -500,7 +438,6 @@ def calculate_aggregate_statistics(patient_results):
     if not patient_results:
         return {}
     
-    # Overall accuracy (patient-level)
     correct_predictions = sum(1 for p in patient_results if p['is_correct'])
     total_patients = len(patient_results)
     accuracy = correct_predictions / total_patients if total_patients > 0 else 0
@@ -513,10 +450,8 @@ def calculate_aggregate_statistics(patient_results):
     # Ground truth: 1 for death, 0 for discharge
     y_true = np.array([1 if p['ground_truth_outcome'] == ST.DEATH else 0 
                        for p in patient_results])
-    # Predicted probability of death
     y_score = np.array([p['mortality_probability'] for p in patient_results])
     
-    # Patient-level statistics for death patients
     if death_patients:
         death_correct = sum(1 for p in death_patients if p['is_correct'])
         death_accuracy = death_correct / len(death_patients)
@@ -525,7 +460,6 @@ def calculate_aggregate_statistics(patient_results):
         death_accuracy = 0
         death_avg_mortality_prob = 0
     
-    # Patient-level statistics for discharge patients
     if discharge_patients:
         discharge_correct = sum(1 for p in discharge_patients if p['is_correct'])
         discharge_accuracy = discharge_correct / len(discharge_patients)
@@ -1413,9 +1347,9 @@ def create_summary_report(all_results, output_dir):
 
 
 def generate_all_plots(output_dir):
-    """Generate ROC curve plot from saved results."""
+    """Generate all plots from saved results."""
     print("\n" + "="*70)
-    print("GENERATING ROC CURVE PLOT")
+    print("GENERATING ALL PLOTS")
     print("="*70)
     
     # Set matplotlib style
@@ -1433,19 +1367,27 @@ def generate_all_plots(output_dir):
         print("⚠️  No results found to plot!")
         return
     
-    # Generate ROC curve plot
+    # Generate all plots
     print("\n🎨 Generating ROC curves...")
     plot_roc_curves(all_results, output_dir)
+    
+    print("\n🎨 Generating PR curves...")
+    plot_pr_curves(all_results, output_dir)
+    
+    print("\n🎨 Generating probability distributions...")
+    plot_probability_distributions(all_results, output_dir)
     
     # Create summary report
     print("\n📝 Creating summary report...")
     create_summary_report(all_results, output_dir)
     
     print("\n" + "="*70)
-    print("✅ ROC CURVE PLOT GENERATED!")
+    print("✅ ALL PLOTS GENERATED!")
     print("="*70)
     print(f"\n📁 Files saved to: {output_dir}/")
     print("  - mortality_roc_curves.png")
+    print("  - mortality_pr_curves.png")
+    print("  - mortality_probability_distributions.png")
     print("  - mortality_prediction_summary.txt")
     print()
 
