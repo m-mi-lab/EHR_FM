@@ -20,8 +20,10 @@ services:
       - ${DATA_DIR:-./data}:/workspace/data:ro
       # Mount outputs directory to persist checkpoints and logs
       - ${OUTPUTS_DIR:-./outputs}:/workspace/outputs
-      # Mount config directory if you want to modify configs
-      - ./src/conf:/workspace/src/conf
+      # Mount source code for live editing (changes reflect immediately)
+      - ./src:/workspace/src
+      - ./scripts:/workspace/scripts
+      - ./test_distributed.py:/workspace/test_distributed.py
     networks:
       - ehr_fm_network
     depends_on:
