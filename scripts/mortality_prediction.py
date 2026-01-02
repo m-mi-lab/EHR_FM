@@ -199,8 +199,14 @@ def run_mortality_prediction_for_patient(model, context, ground_truth_outcome, v
     Run mortality prediction for a single patient using multiple trajectories.
     """
     vocab_size = len(vocab)
-    death_token_id = vocab.stoi.get(ST.DEATH, -1)
-    discharge_token_id = vocab.stoi.get(ST.DISCHARGE, -1)
+
+
+    if ST.DEATH not in vocab.stoi:
+        raise ValueError(f"Death token {ST.DEATH} not found in vocabulary")
+    if ST.DISCHARGE not in vocab.stoi:
+        raise ValueError(f"Discharge token {ST.DISCHARGE} not found in vocabulary")
+    death_token_id = vocab.stoi.get(ST.DEATH)
+    discharge_token_id = vocab.stoi.get(ST.DISCHARGE)
     
     trajectories = []
     death_count = 0
