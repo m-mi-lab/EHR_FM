@@ -17,3 +17,8 @@ inference_results.json
 # Test files
 test.py
 test.ipynb
+
+# Environment files (contain secrets)
+.env
+*.env
+!env.example
