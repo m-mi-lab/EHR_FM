@@ -322,20 +322,23 @@ fi
 if [ "$SKIP_TOKENIZATION" = false ]; then
     log_step "Running Tokenization"
     
-    # Determine input directory for tokenization
-    MEDS_TRAIN_DIR="${MIMICIV_MEDS_DIR}/data/train"
+    # Convert to absolute paths
+    ABS_MEDS_DIR="$(cd "$SCRIPT_DIR" && realpath "$MIMICIV_MEDS_DIR")"
+    ABS_TOKENIZED_DIR="$(cd "$SCRIPT_DIR" && mkdir -p "$TOKENIZED_DIR" && realpath "$TOKENIZED_DIR")"
+    MEDS_TRAIN_DIR="${ABS_MEDS_DIR}/data/train"
+    
+    log "Using absolute paths for tokenization:"
+    log "  MEDS_TRAIN_DIR:  $MEDS_TRAIN_DIR"
+    log "  TOKENIZED_DIR:   $ABS_TOKENIZED_DIR"
     
     if [ "$DRY_RUN" = false ] && [ ! -d "$MEDS_TRAIN_DIR" ]; then
         error "MEDS train directory not found: $MEDS_TRAIN_DIR"
     fi
     
-    # Create tokenized output directory
-    run_cmd "mkdir -p '$TOKENIZED_DIR'"
-    
     # Run tokenization with Hydra overrides
     run_cmd "cd '$SCRIPT_DIR' && python3 -m src.tokenizer.run_tokenization \
         input_dir='$MEDS_TRAIN_DIR' \
-        output_dir='$TOKENIZED_DIR'"
+        output_dir='$ABS_TOKENIZED_DIR'"
     
     log "Tokenization completed successfully"
 else
@@ -346,21 +349,24 @@ fi
 # Step 3: Determine Tokenized Data Path
 # ==============================================================================
 
+# Convert tokenized dir to absolute path
+ABS_TOKENIZED_DIR="$(cd "$SCRIPT_DIR" && mkdir -p "$TOKENIZED_DIR" && realpath "$TOKENIZED_DIR")"
+
 # Find the actual tokenized dataset directory
 # The tokenization script creates a subdirectory like "mimic_train"
 if [ "$DRY_RUN" = true ]; then
-    FINAL_TOKENIZED_DIR="${TOKENIZED_DIR}/mimic_train"
+    FINAL_TOKENIZED_DIR="${ABS_TOKENIZED_DIR}/mimic_train"
     log "[DRY-RUN] Would use tokenized data from: $FINAL_TOKENIZED_DIR"
 else
-    if [ -d "${TOKENIZED_DIR}/mimic_train" ]; then
-        FINAL_TOKENIZED_DIR="${TOKENIZED_DIR}/mimic_train"
+    if [ -d "${ABS_TOKENIZED_DIR}/mimic_train" ]; then
+        FINAL_TOKENIZED_DIR="${ABS_TOKENIZED_DIR}/mimic_train"
     else
         # Try to find any directory with vocab file
-        VOCAB_FILE=$(find "$TOKENIZED_DIR" -name "vocab_t*.csv" -type f 2>/dev/null | head -1)
+        VOCAB_FILE=$(find "$ABS_TOKENIZED_DIR" -name "vocab_t*.csv" -type f 2>/dev/null | head -1)
         if [ -n "$VOCAB_FILE" ]; then
             FINAL_TOKENIZED_DIR="$(dirname "$VOCAB_FILE")"
         else
-            FINAL_TOKENIZED_DIR="$TOKENIZED_DIR"
+            FINAL_TOKENIZED_DIR="$ABS_TOKENIZED_DIR"
         fi
     fi
 
