@@ -439,10 +439,12 @@ def train_worker(rank, world_size, cfg: DictConfig):
                     logger.info(f"Saving recent checkpoint to {recent_ckpt_path}")
                     torch.save(checkpoint, recent_ckpt_path)
                     
-                    # Log checkpoint as artifact to MLflow
+                    # Log checkpoints as artifacts to MLflow
                     if mlflow_run:
                         try:
                             mlflow.log_artifact(str(ckpt_path), artifact_path="checkpoints")
+                            mlflow.log_artifact(str(recent_ckpt_path), artifact_path="checkpoints")
+                            logger.info(f"Uploaded checkpoints to MLflow: best_model.pt, ckpt_{iter_num}.pt")
                         except Exception as e:
                             logger.warning(f"Failed to log checkpoint to MLflow: {e}")
             if world_size > 1:
