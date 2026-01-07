@@ -121,11 +121,24 @@ def train_worker(rank, world_size, cfg: DictConfig):
         # Initialize MLflow
         mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
         mlflow_experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "EHR_FM")
+        mlflow_artifact_uri = os.getenv("MLFLOW_ARTIFACT_URI", None)
         try:
             mlflow.set_tracking_uri(mlflow_tracking_uri)
             mlflow.set_experiment(mlflow_experiment_name)
+            # Start run with explicit artifact location if configured
+            run_kwargs = {}
+            if mlflow_artifact_uri:
+                # Set the artifact location for this run
+                # Note: This requires the experiment to be configured with the artifact location
+                # or we pass it when creating the experiment
+                experiment = mlflow.get_experiment_by_name(mlflow_experiment_name)
+                if experiment is None:
+                    mlflow.create_experiment(mlflow_experiment_name, artifact_location=mlflow_artifact_uri)
+                    mlflow.set_experiment(mlflow_experiment_name)
             mlflow_run = mlflow.start_run()
             logger.info(f"MLflow tracking initialized: {mlflow_tracking_uri}, experiment: {mlflow_experiment_name}")
+            if mlflow_artifact_uri:
+                logger.info(f"MLflow artifact URI: {mlflow_artifact_uri}")
             
             # Log hyperparameters
             flat_config = OmegaConf.to_container(cfg, resolve=True)

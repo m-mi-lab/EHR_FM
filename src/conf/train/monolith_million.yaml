@@ -6,7 +6,7 @@ log_interval: 10
 save_checkpoints: True
 checkpoint_interval: 1000  # Save periodic checkpoints every N iterations regardless of val loss 
 
-resume_from_checkpoint: /workspace/outputs/2025-11-17/19-21-21_model=gpt2_small_monolith,train=monolith_million,world_size=auto/best_model.pt
+resume_from_checkpoint: null
 
 # Optimizer 
 lr: 1e-2             

@@ -74,9 +74,9 @@ def estimate_loss(
                         try:
                             acc = top_k_accuracy(logits, Y, k=k, threshold=block_thresh)
                             precision, recall = top_k_pr(logits, Y, k=k, threshold=block_thresh)
-                            all_tokens_res[f"acc_top/all/{split}/{block_thresh}/k={k}"].append(acc)
-                            all_tokens_res[f"precision/all/{split}/{block_thresh}/k={k}"].append(precision)
-                            all_tokens_res[f"recall/all/{split}/{block_thresh}/k={k}"].append(recall)
+                            all_tokens_res[f"acc_top/all/{split}/{block_thresh}/k_{k}"].append(acc)
+                            all_tokens_res[f"precision/all/{split}/{block_thresh}/k_{k}"].append(precision)
+                            all_tokens_res[f"recall/all/{split}/{block_thresh}/k_{k}"].append(recall)
                         except Exception as e:
                             print(f"Error calculating accuracy for k={k}: {e}")
                     
@@ -88,9 +88,9 @@ def estimate_loss(
                             try:
                                 acc = top_k_acc_special(logits, Y, token, k=k, threshold=block_thresh)
                                 precision, recall, tc = top_k_pr_special(logits, Y, token, k=k, threshold=block_thresh)
-                                toi_res[f"acc_top/{stoken}/{split}/{block_thresh}/k={k}"].append(acc)
-                                toi_res[f"precision/{stoken}/{split}/{block_thresh}/k={k}"].append((precision, tc))
-                                toi_res[f"recall/{stoken}/{split}/{block_thresh}/k={k}"].append((recall, tc))
+                                toi_res[f"acc_top/{stoken}/{split}/{block_thresh}/k_{k}"].append(acc)
+                                toi_res[f"precision/{stoken}/{split}/{block_thresh}/k_{k}"].append((precision, tc))
+                                toi_res[f"recall/{stoken}/{split}/{block_thresh}/k_{k}"].append((recall, tc))
 
                             except Exception as e:
                                 print(f"Error calculating special token accuracy for {stoken}, k={k}: {e}")
