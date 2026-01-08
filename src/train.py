@@ -326,7 +326,26 @@ def train_worker(rank, world_size, cfg: DictConfig):
     if device.type == 'cuda':
         activities.append(ProfilerActivity.CUDA)
 
-    profile_schedule = torch.profiler.schedule(wait=10, warmup=2, active=5, repeat=1)
+    # Profiler configuration - create ONCE before the loop to avoid memory leaks
+    # Only enable profiling for a limited number of iterations to capture representative data
+    profile_enabled = getattr(cfg.train, 'enable_profiling', False)
+    profile_start_iter = getattr(cfg.train, 'profile_start_iter', 10)
+    profile_iterations = getattr(cfg.train, 'profile_iterations', 17)  # wait(10) + warmup(2) + active(5)
+    
+    if rank == 0 and profile_enabled:
+        profile_schedule = torch.profiler.schedule(wait=10, warmup=2, active=5, repeat=1)
+        train_profiler = profile(
+            activities=activities,
+            schedule=profile_schedule,
+            on_trace_ready=tensorboard_trace_handler(str(profiler_log_dir / "train")),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=False  # Disable stack traces to reduce memory overhead
+        )
+        train_profiler.__enter__()
+        logger.info(f"Profiler enabled for iterations {profile_start_iter} to {profile_start_iter + profile_iterations}")
+    else:
+        train_profiler = None
 
     while iter_num < cfg.train.max_iters:
         lr = get_lr(iter_num, cfg.train) if cfg.train.decay_lr else cfg.train.lr
@@ -339,21 +358,10 @@ def train_worker(rank, world_size, cfg: DictConfig):
                 eval_model = raw_model
 
 
-                with profile(
-                    activities=activities,
-                    record_shapes=True,
-                    profile_memory=True,
-                    with_stack=True, # Good for more detailed analysis, but can add overhead
-                    on_trace_ready=tensorboard_trace_handler(str(profiler_log_dir / f"val_iter_{iter_num}")),
-                    # schedule=torch.profiler.schedule(wait=0, warmup=1, active=cfg.train.eval_iters, repeat=1) # Profile all eval iters
-                ) as val_prof:
-                    val_start_time = time.time()
-                    # Note: estimate_loss itself might need to be adjusted if it has internal loops
-                    # and you want to profile each of those.
-                    # For now, we profile the entire estimate_loss call.
-                    losses = estimate_loss(eval_model, ctx, get_batch_worker, cfg.train.eval_iters, tokens_of_interest, cfg.model)
-                    val_end_time = time.time()
-                    val_prof.step() # Mark profiler step after validation
+                # Validation timing without per-call profiler to avoid memory leaks
+                val_start_time = time.time()
+                losses = estimate_loss(eval_model, ctx, get_batch_worker, cfg.train.eval_iters, tokens_of_interest, cfg.model)
+                val_end_time = time.time()
 
                 val_duration = val_end_time - val_start_time
                 val_throughput = (cfg.train.eval_iters * batch_size_per_gpu * world_size) / val_duration if val_duration > 0 else 0
@@ -449,62 +457,51 @@ def train_worker(rank, world_size, cfg: DictConfig):
                             logger.warning(f"Failed to log checkpoint to MLflow: {e}")
             if world_size > 1:
                 dist.barrier()
+            
+            # Clear CUDA cache after validation to release fragmented memory
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
 
         model.train()
 
-
-        if rank == 0:
-            current_profiler_context = profile(
-                activities=activities,
-                schedule=profile_schedule, # Use the defined schedule
-                on_trace_ready=tensorboard_trace_handler(str(profiler_log_dir / f"train_iter_{iter_num}")),
-                record_shapes=True,
-                profile_memory=True,
-                with_stack=True
-            )
-        else:
-            current_profiler_context = nullcontext() # No-op context for other ranks
-
-
-        with current_profiler_context as train_prof:
-            optimizer.zero_grad(set_to_none=True)
-            
-            accumulated_loss_value = 0.0 # For logging the accumulated main loss
-            accumulated_raw_aux_loss = None
-            accumulated_raw_router_z_loss = None
-            iter_start_time = time.time()
-
-            for micro_step in range(cfg.train.gradient_accumulation_steps):
-                # DDP sync for last micro_step or if not using DDP
-                sync_context = model.no_sync if (world_size > 1 and (micro_step < cfg.train.gradient_accumulation_steps - 1)) else nullcontext
-                with sync_context():
-                    with ctx:
-                        with record_function("train_forward_pass"):
-                            X, Y = get_batch_worker("train")
-                            output: ModelOutput = model(X, Y) # output is ModelOutput
-                            loss = output.loss 
-                            loss = loss / cfg.train.gradient_accumulation_steps # Normalize loss for accumulation
-
-                        accumulated_loss_value += loss.item() * cfg.train.gradient_accumulation_steps # De-normalize for logging sum
-                        # Accumulate raw aux losses for logging (average over micro_steps)
-                        if output.aux_loss is not None:
-                            if accumulated_raw_aux_loss is None: accumulated_raw_aux_loss = 0.0
-                            accumulated_raw_aux_loss += output.aux_loss.item()
-                        if output.router_z_loss is not None:
-                            if accumulated_raw_router_z_loss is None: accumulated_raw_router_z_loss = 0.0
-                            accumulated_raw_router_z_loss += output.router_z_loss.item()
-                        with record_function("train_backward_pass"):
-                            scaler.scale(loss).backward()
-
-            if cfg.train.grad_clip > 0.0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
+        optimizer.zero_grad(set_to_none=True)
         
-            scaler.step(optimizer)
-            scaler.update()
-            iter_end_time = time.time()
-            if rank == 0 and train_prof: # If profiler was active for this step
-                train_prof.step() # Signal the profiler that a step is complete
+        accumulated_loss_value = 0.0 # For logging the accumulated main loss
+        accumulated_raw_aux_loss = None
+        accumulated_raw_router_z_loss = None
+        iter_start_time = time.time()
+
+        for micro_step in range(cfg.train.gradient_accumulation_steps):
+            # DDP sync for last micro_step or if not using DDP
+            sync_context = model.no_sync if (world_size > 1 and (micro_step < cfg.train.gradient_accumulation_steps - 1)) else nullcontext
+            with sync_context():
+                with ctx:
+                    X, Y = get_batch_worker("train")
+                    output: ModelOutput = model(X, Y) # output is ModelOutput
+                    loss = output.loss 
+                    loss = loss / cfg.train.gradient_accumulation_steps # Normalize loss for accumulation
+
+                    accumulated_loss_value += loss.item() * cfg.train.gradient_accumulation_steps # De-normalize for logging sum
+                    # Accumulate raw aux losses for logging (average over micro_steps)
+                    if output.aux_loss is not None:
+                        if accumulated_raw_aux_loss is None: accumulated_raw_aux_loss = 0.0
+                        accumulated_raw_aux_loss += output.aux_loss.item()
+                    if output.router_z_loss is not None:
+                        if accumulated_raw_router_z_loss is None: accumulated_raw_router_z_loss = 0.0
+                        accumulated_raw_router_z_loss += output.router_z_loss.item()
+                    scaler.scale(loss).backward()
+
+        if cfg.train.grad_clip > 0.0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
+    
+        scaler.step(optimizer)
+        scaler.update()
+        iter_end_time = time.time()
+        
+        # Step the profiler if enabled (uses the single profiler created before the loop)
+        if rank == 0 and train_profiler is not None:
+            train_profiler.step()
 
 
         if rank == 0:
@@ -585,6 +582,11 @@ def train_worker(rank, world_size, cfg: DictConfig):
         if iter_num >= cfg.train.max_iters:
              logger.info(f"Rank {rank} reached max iterations ({cfg.train.max_iters}).")
              break
+
+    # Clean up profiler if it was enabled
+    if rank == 0 and train_profiler is not None:
+        train_profiler.__exit__(None, None, None)
+        logger.info("Profiler stopped and traces saved.")
 
     if rank == 0 and cfg.train.save_checkpoints:
         # save_model_config = {
