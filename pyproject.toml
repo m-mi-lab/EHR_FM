@@ -34,7 +34,9 @@ dependencies = [
     "pyarrow",
     "numpy",
     "pytorch-lightning",
-    "tensorboard"
+    "tensorboard",
+    "python-dotenv",
+    "boto3",
 ]
 
 [project.optional-dependencies]

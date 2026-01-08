@@ -22,3 +22,38 @@ test.ipynb
 .env
 *.env
 !env.example
+
+# Python cache and environment
+*.pyo
+*.pyd
+*.pytorch_trace
+.pytest_cache/
+pip-wheel-metadata/
+.eggs/
+*.manifest
+*.spec
+
+# Jupyter and notebook checkpoints
+.ipynb_checkpoints/
+
+# Cython build files
+build/
+dist/
+
+# VSCode settings
+.vscode/
+
+# MyPy cache
+.mypy_cache/
+
+# Coverage reports
+htmlcov/
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+src/__pycache__/__init__.cpython-312.pyc

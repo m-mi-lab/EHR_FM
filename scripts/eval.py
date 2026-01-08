@@ -16,6 +16,7 @@ import seaborn as sns
 sys.path.append(str(Path(__file__).parent.parent))
 from src.tokenizer.datasets.base import TimelineDataset
 from src.tokenizer.vocabulary import Vocabulary
+from src.utils import load_env, resolve_model_path
 from omegaconf import OmegaConf
 from transformers import GPT2Config
 from src.model import GPT2LMNoBiasModel
@@ -557,7 +558,12 @@ def main():
     parser = argparse.ArgumentParser(description="EHR-FM model evaluation")
     parser.add_argument('--config', type=str, default='eval_config.yaml',
                         help='Path to evaluation config file')
+    parser.add_argument('--env', type=str, default=None,
+                        help='Path to .env file (optional)')
     args = parser.parse_args()
+    
+    # Load environment variables
+    load_env(args.env)
     
     # Load configuration
     config = load_config(args.config)
@@ -578,11 +584,14 @@ def main():
     # Evaluate each model
     for model_name, model_config in config['models'].items():
         print(f"\n--- Evaluating {model_name} ---")
-        model_path = model_config['path']
+        model_path_spec = model_config['path']
+        
+        # Resolve model path (handles S3 URIs and local paths)
+        model_path = resolve_model_path(model_path_spec)
         
         # Load model
         print("Loading model...")
-        model, vocab, device = load_model(model_path)
+        model, vocab, device = load_model(str(model_path))
         print(f"✅ Model loaded. Vocab size: {len(vocab)}")
         
         # Run evaluation
