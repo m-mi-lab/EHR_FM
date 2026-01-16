@@ -31,6 +31,7 @@ from collections import defaultdict
 sys.path.append(str(Path(__file__).parent.parent))
 from src.tokenizer.datasets.base import TimelineDataset
 from src.tokenizer.vocabulary import Vocabulary
+from src.utils import load_env, resolve_model_path
 from omegaconf import OmegaConf
 from transformers import GPT2Config
 from src.model import GPT2LMNoBiasModel
@@ -584,7 +585,12 @@ def main():
                         help='Sampling temperature (higher = more random)')
     parser.add_argument('--max-tokens', type=int, default=48,
                         help='Max tokens per trajectory (~48h)')
+    parser.add_argument('--env', type=str, default=None,
+                        help='Path to .env file (optional)')
     args = parser.parse_args()
+    
+    # Load environment variables
+    load_env(args.env)
     
     # Load configuration
     if os.path.exists(args.config):
@@ -621,11 +627,13 @@ def main():
     # Determine models to evaluate
     models_to_eval = {}
     if args.model:
-        models_to_eval['custom_model'] = args.model
+        # Resolve the model path (handles S3 URIs)
+        models_to_eval['custom_model'] = str(resolve_model_path(args.model))
     else:
-        # Extract paths from config
-        models_to_eval = {name: cfg['path'] if isinstance(cfg, dict) else cfg 
-                         for name, cfg in models_config.items()}
+        # Extract paths from config and resolve them
+        for name, cfg in models_config.items():
+            path_spec = cfg['path'] if isinstance(cfg, dict) else cfg
+            models_to_eval[name] = str(resolve_model_path(path_spec))
     
     if not models_to_eval:
         print("ERROR: No models specified. Provide --model or use config file.")

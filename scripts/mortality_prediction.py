@@ -33,6 +33,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from src.tokenizer.datasets.hospital_mortality import HospitalMortalityDataset
 from src.tokenizer.vocabulary import Vocabulary
 from src.tokenizer.constants import SpecialToken as ST
+from src.utils import load_env, resolve_model_path
 from omegaconf import OmegaConf
 from transformers import GPT2Config
 from src.model import GPT2LMNoBiasModel
@@ -1427,8 +1428,13 @@ def main():
                         help='Path to save/load cached patient data (avoids reprocessing dataset)')
     parser.add_argument('--discard-unfinished-trajectories', action='store_true',
                         help='Exclude trajectories without death/discharge outcome from mortality probability calculation')
+    parser.add_argument('--env', type=str, default=None,
+                        help='Path to .env file (optional)')
     
     args = parser.parse_args()
+    
+    # Load environment variables
+    load_env(args.env)
     
     # Load configuration
     config = {}
@@ -1475,15 +1481,13 @@ def main():
     # Determine models to evaluate
     models_to_eval = {}
     if args.model:
-        # Single model from command line
-        models_to_eval['custom_model'] = args.model
+        # Single model from command line - resolve path (handles S3 URIs)
+        models_to_eval['custom_model'] = str(resolve_model_path(args.model))
     elif 'models' in config and config['models']:
-        # Multiple models from config
+        # Multiple models from config - resolve each path
         for name, model_config in config['models'].items():
-            if isinstance(model_config, dict):
-                models_to_eval[name] = model_config['path']
-            else:
-                models_to_eval[name] = model_config
+            path_spec = model_config['path'] if isinstance(model_config, dict) else model_config
+            models_to_eval[name] = str(resolve_model_path(path_spec))
     else:
         print("❌ ERROR: No models specified. Use --model or add models to config file.")
         return

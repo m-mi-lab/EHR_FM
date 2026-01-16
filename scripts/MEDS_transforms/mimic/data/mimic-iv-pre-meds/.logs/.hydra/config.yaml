@@ -1,0 +1,4 @@
+input_dir: ./data/mimic-iv-raw
+cohort_dir: ./data/mimic-iv-pre-meds
+do_overwrite: false
+log_dir: ${cohort_dir}/.logs

@@ -28,17 +28,23 @@ def estimate_loss(
 
 
 
+    # Check if model is MoE for tracking aux losses
+    is_moe_eval_model = hasattr(model, 'moe_config') and hasattr(model.moe_config, 'n_experts') and getattr(model.moe_config, 'n_experts', 0) > 1
+
     # Evaluate on training and validation splits
     for split in ["train", "val"]:
         # Store losses across evaluation iterations
         losses = []
+        
+        # Store MoE metrics as scalars (not tensors) to avoid memory leaks
+        aux_loss_values = []
+        router_z_loss_values = []
         
         # Store results for tokens
         all_tokens_res = defaultdict(list)
         toi_res = defaultdict(list)
         
         # Run evaluation for specified number of iterations
-        last_output = None
         for i in range(eval_iters):
             try:
                 # Get batch data
@@ -52,9 +58,6 @@ def estimate_loss(
                     else:
                         output = model(input_ids=X, labels=Y)
                     
-                    # Store the last successful output for MoE metrics
-                    last_output = output
-                    
                     # Get loss and logits from model output
                     if hasattr(output, 'loss'):
                         loss = output.loss
@@ -63,8 +66,15 @@ def estimate_loss(
                         # Handle different output formats
                         loss = output[0] if isinstance(output, tuple) else output
                         logits = output[1] if isinstance(output, tuple) and len(output) > 1 else None
+                    
+                    # Extract MoE metrics immediately as scalars to avoid holding tensor references
+                    if is_moe_eval_model:
+                        if hasattr(output, 'aux_loss') and output.aux_loss is not None:
+                            aux_loss_values.append(float(output.aux_loss.item()))
+                        if hasattr(output, 'router_z_loss') and output.router_z_loss is not None:
+                            router_z_loss_values.append(float(output.router_z_loss.item()))
                 
-                # Store loss
+                # Store loss as scalar
                 losses.append(float(loss.item()))
                 
                 # Calculate accuracy metrics for validation set
@@ -74,26 +84,27 @@ def estimate_loss(
                         try:
                             acc = top_k_accuracy(logits, Y, k=k, threshold=block_thresh)
                             precision, recall = top_k_pr(logits, Y, k=k, threshold=block_thresh)
-                            all_tokens_res[f"acc_top/all/{split}/{block_thresh}/k={k}"].append(acc)
-                            all_tokens_res[f"precision/all/{split}/{block_thresh}/k={k}"].append(precision)
-                            all_tokens_res[f"recall/all/{split}/{block_thresh}/k={k}"].append(recall)
+                            all_tokens_res[f"acc_top/all/{split}/{block_thresh}/k_{k}"].append(acc)
+                            all_tokens_res[f"precision/all/{split}/{block_thresh}/k_{k}"].append(precision)
+                            all_tokens_res[f"recall/all/{split}/{block_thresh}/k_{k}"].append(recall)
                         except Exception as e:
                             print(f"Error calculating accuracy for k={k}: {e}")
                     
-
-
                     # Top-k accuracy for special tokens
                     for stoken, token in tokens_of_interest.items():
                         for k in [1, 3, 10]:
                             try:
                                 acc = top_k_acc_special(logits, Y, token, k=k, threshold=block_thresh)
                                 precision, recall, tc = top_k_pr_special(logits, Y, token, k=k, threshold=block_thresh)
-                                toi_res[f"acc_top/{stoken}/{split}/{block_thresh}/k={k}"].append(acc)
-                                toi_res[f"precision/{stoken}/{split}/{block_thresh}/k={k}"].append((precision, tc))
-                                toi_res[f"recall/{stoken}/{split}/{block_thresh}/k={k}"].append((recall, tc))
+                                toi_res[f"acc_top/{stoken}/{split}/{block_thresh}/k_{k}"].append(acc)
+                                toi_res[f"precision/{stoken}/{split}/{block_thresh}/k_{k}"].append((precision, tc))
+                                toi_res[f"recall/{stoken}/{split}/{block_thresh}/k_{k}"].append((recall, tc))
 
                             except Exception as e:
                                 print(f"Error calculating special token accuracy for {stoken}, k={k}: {e}")
+                
+                # Explicitly delete references to free GPU memory
+                del output, loss, logits
             
             except Exception as e:
                 print(f"Error during evaluation iteration {i} for {split}: {e}")
@@ -113,14 +124,13 @@ def estimate_loss(
             out.update({test_name: np.mean(v) for test_name, v in all_tokens_res.items()})
             out.update({test_name: compute_weighted_mean(v) for test_name, v in toi_res.items()})
 
-        is_moe_eval = hasattr(moe_config, 'n_experts') and getattr(moe_config, 'n_experts', 0) > 1
-        if hasattr(model, 'moe_config'):
-            is_moe_eval_model = hasattr(model.moe_config, 'n_experts') and getattr(model.moe_config, 'n_experts', 0) > 1
-            if is_moe_eval_model and last_output is not None:
-                if hasattr(last_output, 'aux_loss') and last_output.aux_loss is not None:
-                        out[f'moe/aux_loss_raw/{split}'] = last_output.aux_loss.item() # Or average it if eval_iters > 1
-                if hasattr(last_output, 'router_z_loss') and last_output.router_z_loss is not None:
-                        out[f'moe/router_z_loss_raw/{split}'] = last_output.router_z_loss.item()
+        # Add MoE metrics (averaged over all eval iterations)
+        if is_moe_eval_model:
+            if aux_loss_values:
+                out[f'moe/aux_loss_raw/{split}'] = sum(aux_loss_values) / len(aux_loss_values)
+            if router_z_loss_values:
+                out[f'moe/router_z_loss_raw/{split}'] = sum(router_z_loss_values) / len(router_z_loss_values)
+    
     model.train()
     
     return out
