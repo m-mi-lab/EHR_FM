@@ -175,3 +175,62 @@ Access TensorBoard at `http://localhost:6006` to visualize training progress. Te
 - **Automatic Checkpointing**: Regular saves and best model preservation
 - **MIMIC Dataset**: Trained on large-scale EHR data (~298M samples)
 - **Docker Support**: Containerized training with GPU support and MLflow integration
+
+## Mortality Prediction
+
+The project includes a mortality prediction simulation tool that generates patient trajectories and evaluates model predictions.
+
+### Configuration File
+
+Edit `scripts/mortality_pred_config.yaml` to configure your simulation:
+
+```yaml
+data_dir: "/workspace/data/tokenized_datasets/mimic_train"  # Patient data directory
+output_dir: "/workspace/outputs/mortality_prediction_results_JAN"  # Results output
+num_patients: 100  # Total patients to simulate
+target_death_patients: 50  # Target number who experienced death
+num_trajectories_per_patient: 10  # Multiple runs per patient for statistical robustness
+max_tokens: 500  # Safety limit (stops at death/discharge anyway)
+temperature: 1.0  # Sampling temperature for generation
+base_seed: 42  # Random seed for reproducibility
+
+models:
+  "Monolith":
+    path: "/path/to/your/monolith/best_model.pt"
+  "2-Expert":
+    path: "/path/to/your/2expert/best_model.pt"
+```
+
+### Running Mortality Prediction
+
+**Basic usage:**
+```bash
+cd scripts
+python mortality_prediction.py --config mortality_pred_config.yaml
+```
+
+**Optional flags:**
+
+```bash
+# Cache patient data for faster re-runs
+python mortality_prediction.py --config mortality_pred_config.yaml --patient-cache /path/to/cache
+
+# Only keep complete trajectories
+python mortality_prediction.py --config mortality_pred_config.yaml --discard-unfinished-trajectories
+```
+
+### What It Does
+
+1. **Loads patient data** from the specified data directory
+2. **Selects patients** based on `num_patients` and `target_death_patients` criteria
+3. **Generates trajectories** by running each patient through the model(s) multiple times
+4. **Evaluates predictions** by comparing generated outcomes to actual patient outcomes
+5. **Saves results** including metrics, trajectories, and analysis to the output directory
+
+### Output
+
+Results are saved to the specified `output_dir` containing:
+- Prediction metrics (accuracy, precision, recall, etc.)
+- Generated trajectory samples
+- Model comparison statistics
+- Detailed logs

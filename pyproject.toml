@@ -20,32 +20,29 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "torch",
-    "transformers",
-    "polars",
-    "hydra-core",
-    "hydra-joblib-launcher",
-    "loguru",
-    "safetensors",
-    "tqdm",
-    "wandb",
-    "mlflow",
-    "MEDS_transforms~=0.1.0",
-    "pyarrow",
-    "numpy",
-    "pytorch-lightning",
-    "tensorboard"
+  "torch",
+  "transformers",
+  "polars",
+  "hydra-core",
+  "hydra-joblib-launcher",
+  "loguru",
+  "safetensors",
+  "tqdm",
+  "wandb",
+  "mlflow",
+  "MEDS_transforms~=0.1.0",
+  "pyarrow",
+  "numpy",
+  "pytorch-lightning",
+  "tensorboard",
+  "einops",
 ]
 
 [project.optional-dependencies]
 dev = ["pre-commit<4"]
 tests = ["pytest"]
 jupyter = ["jupyter", "seaborn", "scikit-learn", "matplotlib", "pandas", "altair", "pylatex", "vl-convert-python"]
-
-#[project.scripts]
-#ethos_tokenize = "ethos.tokenize.run_tokenization:main"
-#ethos_train = "ethos.train.run_training:main"
-#ethos_infer = "ethos.inference.run_inference:main"
+eval = ["scikit-learn", "psutil", "pyyaml"]
 
 #[tool.setuptools.package-data]
 #ethos = ["tokenize/maps/*.csv.gz"]
