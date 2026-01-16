@@ -104,7 +104,7 @@ See `.env.example` for available configuration options:
 ## Data Preparation
 
 ```bash
-python3 -m src.tokenizer.run_tokenization
+python3 -m src.tokenizer.run_tokenization --config-name=tokenization_train
 ```
 
 ## Training
