@@ -1,0 +1,17 @@
+# Tuned monolith model config
+# Reduced dropout compared to base monolith config for better training stability
+
+# vocab_size is determined during runtime
+n_positions: 2048      
+n_embd: 768            
+n_layer: 6            
+n_head: 12              
+# n_inner: null        # 4*n_embd if null
+activation_function: "gelu" 
+
+# Dropout - REDUCED from 0.3 to 0.2 for better training with smaller batches
+resid_pdrop: 0.2       # CHANGED from 0.3
+embd_pdrop: 0.2        # CHANGED from 0.3
+attn_pdrop: 0.2        # CHANGED from 0.3
+bias: False            # lin layer bias, not gpt2 training bias
+

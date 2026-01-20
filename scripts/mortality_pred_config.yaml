@@ -1,10 +1,10 @@
 # Mortality Prediction Simulation Configuration
 data_dir: "/home/sud/temp_/ehr_stuff/EHR_FM/data/tokenized_datasets/mimic_train"
-output_dir: "/home/sud/temp_/ehr_stuff/EHR_FM/outputs/mortality_prediction_results_JAN"
-num_patients: 100
+output_dir: "/home/sud/temp_/ehr_stuff/EHR_FM/outputs/mortality_prediction_results_JAN_new"
+num_patients: 50
 
-target_death_patients: 50
-num_trajectories_per_patient: 10  # Run 10 trajectories per patient
+target_death_patients: 25
+num_trajectories_per_patient: 20 # Run 20 trajectories per patient
 
 max_tokens: 500  # Safety limit - trajectories stop at death/discharge
 temperature: 1.0
@@ -17,6 +17,6 @@ base_seed: 42
 models:
   "Monolith":
     # path: "/home/sud/temp_/ehr_stuff/EHR_FM/outputs/2026-01-05/19-00-23_model=gpt2_small_monolith,train=monolith_million,world_size=auto/best_model.pt"
-    path: "/home/sud/temp_/ehr_stuff/EHR_FM/outputs/2026-01-05/19-00-23_model=gpt2_small_monolith,train=monolith_million,world_size=auto/best_model.pt"
+    path: "/home/sud/temp_/ehr_stuff/EHR_FM/outputs/2026-01-16/08-49-53_model=gpt2_small_monolith,train=monolith_million,world_size=auto/best_model.pt"
   # "2-Expert":
   #   path: "/home/sud/temp_/ehr_stuff/EHR_FM/outputs/2025-12-05/16-12-39_model=gpt2_small_2exp,train=2_exp,world_size=auto/best_model.pt"

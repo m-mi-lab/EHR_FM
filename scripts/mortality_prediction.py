@@ -26,6 +26,7 @@ from datetime import datetime
 from collections import defaultdict
 from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve, auc, confusion_matrix
 from sklearn.calibration import calibration_curve
+from scipy.stats import norm
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -99,9 +100,12 @@ def load_model(model_path):
 
 
 def generate_single_trajectory(model, context, vocab_size, device, death_token_id, discharge_token_id, 
-                               max_tokens=500, temperature=1.0, seed=None):
+                               max_tokens=500, temperature=1.0, seed=None, force_outcome=True):
     """
     Generate a single trajectory by sampling tokens until death or discharge.
+    
+    If force_outcome=True, will keep generating until an outcome is reached (ignoring max_tokens).
+    If force_outcome=False, will stop at max_tokens even if no outcome reached.
     """
     if seed is not None:
         torch.manual_seed(seed)
@@ -115,8 +119,11 @@ def generate_single_trajectory(model, context, vocab_size, device, death_token_i
     
     current_context = context.clone()
     
+    # If force_outcome=True, set a much higher limit but still have a safety cutoff
+    actual_max_tokens = 10000 if force_outcome else max_tokens
+    
     with torch.no_grad():
-        for step in range(max_tokens):
+        for step in range(actual_max_tokens):
             # Limit context length
             if current_context.size(0) > 512:
                 current_context = current_context[-512:]
@@ -227,7 +234,8 @@ def run_mortality_prediction_for_patient(model, context, ground_truth_outcome, v
             discharge_token_id=discharge_token_id,
             max_tokens=max_tokens,
             temperature=temperature,
-            seed=seed
+            seed=seed,
+            force_outcome=True  # Always generate until outcome is reached
         )
         
         trajectories.append(trajectory)
@@ -439,6 +447,91 @@ def run_mortality_prediction_simulation(model, dataset, vocab, device, model_cfg
     }
 
 
+def fit_gaussian_roc(fpr, tpr):
+    """
+    Fit Gaussian model to ROC curve with unequal variances (ETHOS method).
+    
+    Returns:
+        auroc_gaussian_fit: AUROC from Gaussian fit
+        params: Dictionary with fitted parameters
+    """
+    try:
+        # Convert FPR/TPR to decision variable space using inverse normal CDF
+        # Remove boundary points (0 and 1) to avoid infinities
+        mask = (fpr > 0) & (fpr < 1) & (tpr > 0) & (tpr < 1)
+        if mask.sum() < 4:  # Need at least 4 points for fitting
+            return None, None
+        
+        fpr_filtered = fpr[mask]
+        tpr_filtered = tpr[mask]
+        
+        # Convert to z-scores (decision variable space)
+        z_fpr = norm.ppf(fpr_filtered)
+        z_tpr = norm.ppf(tpr_filtered)
+        
+        # Fit linear relationship: z_tpr = a * z_fpr + b
+        coeffs = np.polyfit(z_fpr, z_tpr, 1)
+        a, b = coeffs[0], coeffs[1]
+        
+        # Extract distribution parameters
+        sigma_ratio = a
+        d_prime = b
+        
+        # Calculate AUROC from d-prime
+        auroc_gaussian_fit = norm.cdf(d_prime / np.sqrt(1 + sigma_ratio**2))
+        
+        params = {
+            'sigma_ratio': sigma_ratio,
+            'd_prime': d_prime,
+            'r_squared': np.corrcoef(z_fpr, z_tpr)[0, 1]**2
+        }
+        
+        return auroc_gaussian_fit, params
+    except Exception as e:
+        print(f"Warning: Gaussian ROC fitting failed: {e}")
+        return None, None
+
+
+def bootstrap_auroc_ci(y_true, y_score, n_bootstraps=1000, confidence_level=0.95, random_seed=42):
+    """
+    Calculate AUROC confidence intervals using bootstrapping (ETHOS method).
+    
+    Returns:
+        auroc_mean: Mean AUROC across bootstrap samples
+        auroc_ci_lower: Lower bound of confidence interval
+        auroc_ci_upper: Upper bound of confidence interval
+        auroc_std: Standard deviation of AUROC
+    """
+    np.random.seed(random_seed)
+    n_samples = len(y_true)
+    aurocs = []
+    
+    for _ in range(n_bootstraps):
+        indices = np.random.choice(n_samples, n_samples, replace=True)
+        y_true_boot = y_true[indices]
+        y_score_boot = y_score[indices]
+        
+        if len(np.unique(y_true_boot)) > 1:
+            try:
+                auroc_boot = roc_auc_score(y_true_boot, y_score_boot)
+                aurocs.append(auroc_boot)
+            except:
+                pass
+    
+    if len(aurocs) == 0:
+        return None, None, None, None
+    
+    aurocs = np.array(aurocs)
+    auroc_mean = np.mean(aurocs)
+    auroc_std = np.std(aurocs)
+    
+    alpha = 1 - confidence_level
+    auroc_ci_lower = np.percentile(aurocs, alpha/2 * 100)
+    auroc_ci_upper = np.percentile(aurocs, (1 - alpha/2) * 100)
+    
+    return auroc_mean, auroc_ci_lower, auroc_ci_upper, auroc_std
+
+
 def calculate_aggregate_statistics(patient_results):
     """Calculate aggregate statistics across all patients, including AUROC."""
     
@@ -525,18 +618,39 @@ def calculate_aggregate_statistics(patient_results):
     try:
         # Only calculate if we have both classes
         if len(np.unique(y_true)) > 1:
+            # Standard AUROC
             auroc = roc_auc_score(y_true, y_score)
             fpr, tpr, thresholds = roc_curve(y_true, y_score)
             precision, recall, pr_thresholds = precision_recall_curve(y_true, y_score)
             auprc = auc(recall, precision)
+            
+            # Bootstrap confidence intervals for AUROC
+            auroc_mean, auroc_ci_lower, auroc_ci_upper, auroc_std = bootstrap_auroc_ci(
+                y_true, y_score, n_bootstraps=1000, confidence_level=0.95
+            )
+            
+            # Gaussian AUROC fit (ETHOS method)
+            auroc_gaussian_fit, gaussian_params = fit_gaussian_roc(fpr, tpr)
         else:
             auroc = 0.0
+            auroc_mean = 0.0
+            auroc_ci_lower = 0.0
+            auroc_ci_upper = 0.0
+            auroc_std = 0.0
+            auroc_gaussian_fit = 0.0
+            gaussian_params = None
             auprc = 0.0
             fpr, tpr, thresholds = None, None, None
             precision, recall, pr_thresholds = None, None, None
     except Exception as e:
         print(f"Warning: Could not calculate AUROC: {e}")
         auroc = 0.0
+        auroc_mean = 0.0
+        auroc_ci_lower = 0.0
+        auroc_ci_upper = 0.0
+        auroc_std = 0.0
+        auroc_gaussian_fit = 0.0
+        gaussian_params = None
         auprc = 0.0
         fpr, tpr, thresholds = None, None, None
         precision, recall, pr_thresholds = None, None, None
@@ -549,6 +663,12 @@ def calculate_aggregate_statistics(patient_results):
         
         # AUROC metrics
         'auroc': auroc,
+        'auroc_mean': auroc_mean,
+        'auroc_ci_lower': auroc_ci_lower,
+        'auroc_ci_upper': auroc_ci_upper,
+        'auroc_std': auroc_std,
+        'auroc_gaussian_fit': auroc_gaussian_fit if auroc_gaussian_fit is not None else 0.0,
+        'gaussian_params': gaussian_params,
         'auprc': auprc,
         
         'death_patients': len(death_patients),
@@ -599,7 +719,15 @@ def print_statistics(stats):
     print(f"   Total trajectories: {stats['total_trajectories']}")
     
     print(f"\n📈 AUROC Metrics:")
-    print(f"   AUROC (Area Under ROC): {stats['auroc']:.4f}")
+    print(f"   AUROC (sklearn): {stats['auroc']:.4f}")
+    if stats.get('auroc_ci_lower') and stats.get('auroc_ci_upper'):
+        print(f"   AUROC (bootstrap mean): {stats['auroc_mean']:.4f} (95% CI: {stats['auroc_ci_lower']:.4f}-{stats['auroc_ci_upper']:.4f})")
+        print(f"   AUROC std: {stats['auroc_std']:.4f}")
+    if stats.get('auroc_gaussian_fit') and stats['auroc_gaussian_fit'] > 0:
+        print(f"   AUROC Gaussian Fit (ETHOS): {stats['auroc_gaussian_fit']:.4f}")
+        if stats.get('gaussian_params'):
+            params = stats['gaussian_params']
+            print(f"      d' = {params['d_prime']:.4f}, σ_ratio = {params['sigma_ratio']:.4f}, R² = {params['r_squared']:.4f}")
     print(f"   AUPRC (Area Under PR Curve): {stats['auprc']:.4f}")
     
     print(f"\n🎯 TRAJECTORY-LEVEL ACCURACY (Averaged per Patient):")
