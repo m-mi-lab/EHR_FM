@@ -21,6 +21,9 @@ from omegaconf import OmegaConf
 from transformers import GPT2Config
 from src.model import GPT2LMNoBiasModel
 
+# Load environment variables
+load_env()
+
 def load_model(model_path):
     """Load model from checkpoint."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

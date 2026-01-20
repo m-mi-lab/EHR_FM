@@ -31,6 +31,10 @@ sys.path.append(str(Path(__file__).parent.parent))
 from src.model import GPT2LMNoBiasModel
 from src.tokenizer.datasets.base import TimelineDataset
 from src.tokenizer.vocabulary import Vocabulary
+from src.utils import artifact_loader
+
+# Load environment variables
+artifact_loader.load_env()
 
 def count_model_parameters(model):
     """Count total and trainable parameters in the model."""

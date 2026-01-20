@@ -1,7 +1,7 @@
 # Mortality Prediction Simulation - 20 Trajectories
 # Configuration for monolith_million model
-data_dir: "/workspace/ehr_stuff/EHR_FM/data/tokenized_datasets/mimic_train"
-output_dir: "/workspace/ehr_stuff/EHR_FM/scripts/mortality_20traj_results"
+data_dir: ${oc.env:TOKENIZED_TRAIN_DIR,/workspace/ehr_stuff/EHR_FM/data/tokenized_datasets/mimic_train}
+output_dir: ${oc.env:OUTPUTS_DIR,/workspace/ehr_stuff/EHR_FM/scripts}/mortality_20traj_results
 num_patients: 1000  # Evaluate on 1000 patients
 
 target_death_patients: 500  # Balanced dataset (500 death, 500 discharge)

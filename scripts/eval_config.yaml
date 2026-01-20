@@ -1,7 +1,7 @@
 # EHR-FM Evaluation Configuration
 
 # Data and output settings
-data_dir: "/workspace/ehr_stuff/EHR_FM/data/tokenized_datasets/mimic_train"
+data_dir: ${oc.env:TOKENIZED_TRAIN_DIR,/workspace/ehr_stuff/EHR_FM/data/tokenized_datasets/mimic_train}
 output_dir: "evaluation_results"
 num_samples: 100
 

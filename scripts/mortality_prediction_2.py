@@ -616,7 +616,7 @@ def main():
         print(f"⚠️  Config file {args.config} not found, using defaults")
     
     # Override config with command line args
-    data_dir = args.data_dir or config.get('data_dir', '/workspace/ehr_stuff/EHR_FM/data/tokenized_datasets/mimic_train')
+    data_dir = args.data_dir or config.get('data_dir', os.getenv('TOKENIZED_TRAIN_DIR', '/workspace/ehr_stuff/EHR_FM/data/tokenized_datasets/mimic_train'))
     output_dir = args.output_dir or config.get('output_dir', 'mortality_prediction_results')
     num_patients = args.num_patients or config.get('num_patients', 100)
     num_trajectories = args.num_trajectories or config.get('num_trajectories_per_patient', 10)

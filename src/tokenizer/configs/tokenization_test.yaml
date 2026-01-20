@@ -3,11 +3,11 @@ defaults:
   - dataset: mimic
   - override hydra/launcher: joblib
 
-input_dir: /home/sud/temp_/ehr_stuff/EHR_FM/data/meds/data/test
-output_dir: /home/sud/temp_/ehr_stuff/EHR_FM/data/tokenized_datasets
+input_dir: ${oc.env:MEDS_TEST_DIR}
+output_dir: ${oc.env:TOKENIZED_DIR}
 out_fn: null
 # Reuse vocabulary from train to avoid data leakage
-vocab: /home/sud/temp_/ehr_stuff/EHR_FM/data/tokenized_datasets/mimic_train
+vocab: ${oc.env:TOKENIZED_TRAIN_DIR}
 num_quantiles: 10
 
 code_counts_fn: code_counts.csv

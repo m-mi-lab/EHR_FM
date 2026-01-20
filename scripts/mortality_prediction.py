@@ -1574,7 +1574,7 @@ def main():
         print(f"⚠️  Config file {args.config} not found, using defaults")
     
     # Override config with command line args
-    data_dir = args.data_dir or config.get('data_dir', '/workspace/ehr_stuff/EHR_FM/data/tokenized_datasets/mimic_train')
+    data_dir = args.data_dir or config.get('data_dir', os.getenv('TOKENIZED_TRAIN_DIR', '/workspace/ehr_stuff/EHR_FM/data/tokenized_datasets/mimic_train'))
     output_dir = args.output_dir or config.get('output_dir', 'mortality_prediction_results')
     
     # If plot-only mode, just generate plots and exit
