@@ -57,3 +57,6 @@ coverage.xml
 .hypothesis/
 
 src/__pycache__/__init__.cpython-312.pyc
+*.png
+*.npy
+*.json

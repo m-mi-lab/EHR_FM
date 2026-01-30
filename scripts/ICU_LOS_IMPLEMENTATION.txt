@@ -1,0 +1,89 @@
+ICU LENGTH OF STAY (LOS) IMPLEMENTATION - ETHOS METHODOLOGY
+============================================================
+
+OVERVIEW:
+---------
+ICU LOS is a regression task that predicts the length of stay in the ICU (in days)
+by aggregating time-interval tokens from generated trajectories.
+
+ETHOS METHODOLOGY (from paper):
+--------------------------------
+"In the same simulation, the LOS in the ICU was estimated by aggregating the 
+time-interval tokens generated in the simulated timeline until the discharge 
+token appeared. Instances where the patient died in the ICU during the simulation 
+were excluded from the LOS calculation."
+
+HOW IT WORKS:
+-------------
+1. Uses ICUMortalityDataset (same as ICU mortality task)
+2. Generates 20 trajectories per patient
+3. For each trajectory:
+   - Tracks cumulative time from time-interval tokens
+   - Stops at ICU_DISCHARGE or DEATH token
+4. Excludes trajectories ending in DEATH
+5. Calculates mean LOS from remaining trajectories
+
+IMPLEMENTATION DETAILS:
+-----------------------
+1. Task Configuration:
+   - task_type: 'regression'
+   - calculate_los: True
+   - Uses same dataset as icu_mortality
+
+2. Trajectory Generation:
+   - Each trajectory tracks cumulative_time_days
+   - Time intervals are summed using vocab.interval_estimates['mean']
+   - Converts microseconds to days
+
+3. LOS Calculation (in run_prediction_for_patient):
+   - Filters out trajectories where outcome_token == DEATH
+   - Calculates mean and median LOS from remaining trajectories
+   - Returns: mean_los_days, median_los_days, los_trajectory_count
+
+4. Statistics (calculate_los_statistics):
+   - MAE (Mean Absolute Error)
+   - MSE (Mean Squared Error)
+   - RMSE (Root Mean Squared Error)
+   - Correlation with ground truth
+   - Error percentiles (25th, 50th, 75th, 90th)
+
+METRICS REPORTED:
+-----------------
+- MAE: Primary metric (ETHOS reports MAE of 2.262 days, 95% CI: 2.161-2.355)
+- MSE & RMSE: Additional error metrics
+- Correlation: Pearson correlation with ground truth
+- Mean/Median predicted vs ground truth LOS
+- Average number of trajectories used (after excluding deaths)
+
+USAGE:
+------
+1. Uncomment 'icu_los' in eval_final_config.yaml tasks list
+2. Run evaluation:
+   python scripts/eval_final.py --config scripts/eval_final_config.yaml
+
+3. Results will include:
+   - Per-patient LOS predictions
+   - Aggregate statistics (MAE, correlation, etc.)
+   - Comparison with ground truth
+
+ETHOS BENCHMARK:
+----------------
+From the ETHOS paper (MIMIC-IV):
+- MAE: 2.262 days (95% CI: 2.161-2.355 days)
+- Comparable to Chen et al.: MAE of 2.42 ± 0.10 days
+
+NOTES:
+------
+- Ground truth LOS needs to be extracted from dataset metadata
+  (currently uses placeholder - needs implementation)
+- Time intervals are estimated using mean values from tokenization
+- Only non-death trajectories are used for LOS calculation
+- This matches ETHOS methodology exactly
+
+FUTURE IMPROVEMENTS:
+--------------------
+1. Extract ground truth LOS from ICU stay metadata
+2. Add bootstrap confidence intervals for MAE
+3. Stratify by ICU type or admission severity
+4. Add visualization of predicted vs actual LOS distribution
+

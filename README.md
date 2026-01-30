@@ -2,6 +2,56 @@
 
 Electronic Health Record Foundation Model with Mixture of Experts (MoE) architecture.
 
+## Evaluation
+
+### Final Comprehensive Evaluation (All Tasks)
+
+Evaluate the trained model on multiple clinical prediction tasks using ETHOS-style frequency-based trajectory method:
+
+```bash
+# Full evaluation on all 4 tasks (100 patients each, 20 trajectories per patient)
+conda activate ehr_fm
+cd /home/sud/temp_/ehr_stuff/EHR_FM
+python scripts/eval_final.py \
+  --config scripts/eval_final_config.yaml \
+  --model /home/sud/temp_/ehr_stuff/EHR_FM/outputs/2026-01-16/08-49-53_model=gpt2_small_monolith,train=monolith_million,world_size=auto/best_model.pt \
+  --output-dir eval_final_results \
+  --patient-cache eval_final_results/patient_cache.json
+
+# Quick test run (10 patients, 5 trajectories)
+python scripts/eval_final.py \
+  --config scripts/eval_final_config.yaml \
+  --model $BEST_MODEL_PATH \
+  --num-patients 10 \
+  --num-trajectories 5 \
+  --output-dir eval_test_run \
+  --patient-cache eval_test_run/patient_cache.json
+
+# Evaluate specific tasks only
+python scripts/eval_final.py \
+  --config scripts/eval_final_config.yaml \
+  --model $BEST_MODEL_PATH \
+  --tasks hosp_mortality icu_mortality \
+  --output-dir eval_mortality_only
+```
+
+**Tasks evaluated:**
+- `hosp_mortality` - Hospital Mortality Prediction (binary)
+- `icu_mortality` - ICU Mortality Prediction (binary)
+- `hosp_readmission` - Hospital 30-day Readmission Prediction (binary)
+- `icu_readmission` - ICU Readmission Prediction (binary)
+- `icu_los` - ICU Length of Stay Prediction in days (regression) *
+- `drg_prediction` - DRG Classification, 771 classes (multiclass) *
+- `sofa_prediction` - First-day SOFA Score Prediction (regression) *
+
+\* Available but not in default config - uncomment in config to enable
+
+**Output:**
+- Per-task results JSON and trajectory data
+- ROC curves comparing all tasks
+- Task comparison bar plots (AUROC, AUPRC, Accuracy, F1)
+- Evaluation summary JSON
+
 ## Setup
 
 ### Local Development Setup
