@@ -1,70 +1,24 @@
-# Final Comprehensive Evaluation Configuration
-# Evaluates model on multiple clinical prediction tasks
+# Direct Probability Inference Configuration
+# Single forward pass evaluation for clinical prediction tasks
 
-# Data and output paths
-data_dir: ${oc.env:TOKENIZED_TRAIN_DIR}
-output_dir: eval_final_results
-
-# Model configuration
+# Data and model paths
+data_dir: ${oc.env:TOKENIZED_TEST_DIR}
 model: ${oc.env:BEST_MODEL_PATH}
-model_name: "monolith_million"
 
+# Evaluation parameters
+num_samples: 1000  # Number of samples (prediction points) to evaluate per task
+batch_size: 512
 # Tasks to evaluate
-# Binary: hosp_mortality, icu_mortality, hosp_readmission, icu_readmission
-# Regression: icu_los (ICU Length of Stay in days)
-# Multiclass: drg_prediction (771 classes)
-# Regression: sofa_prediction (SOFA score 0-24)
+# Available: hosp_mortality, icu_mortality, hosp_readmission, icu_readmission, icu_los
 tasks:
   - hosp_mortality
   - icu_mortality
   - hosp_readmission
   - icu_readmission
-  # - icu_los  # Uncomment to add ICU LOS (regression)
-  # - drg_prediction  # Uncomment to add DRG (multiclass)
-  # - sofa_prediction  # Uncomment to add SOFA (regression)
-
-# Global evaluation parameters
-num_patients: 100  # Default number of patients per task
-num_trajectories_per_patient: 20  # Number of trajectory samples per patient (ETHOS uses 20)
-max_tokens: 10000  # Safety cutoff - ETHOS has no hard limit, runs until outcome
-temperature: 1.0  # Sampling temperature
-base_seed: 42  # Random seed for reproducibility
-
-# Task-specific configurations (optional overrides)
-task_configs:
-  hosp_mortality:
-    num_patients: 100
-    target_positive_patients: 50  # Balance classes: 50 death, 50 discharge
-  
-  icu_mortality:
-    num_patients: 100
-    target_positive_patients: 50  # Balance classes: 50 death, 50 discharge
-  
-  hosp_readmission:
-    num_patients: 100
-    target_positive_patients: 50  # Balance classes: 50 readmit, 50 no readmit
-    max_time_days: 30.0  # Time limit for readmission (ETHOS standard: 30 days). Set to null to disable.
-  
-  icu_readmission:
-    num_patients: 100
-    target_positive_patients: 50  # Balance classes: 50 readmit, 50 no readmit
-    max_time_days: 30.0  # Time limit for readmission (ETHOS standard: 30 days). Set to null to disable.
-  
-  icu_los:
-    num_patients: 100
-    # Regression task - predicts ICU length of stay in days
-  
-  drg_prediction:
-    num_patients: 100
-    # Multiclass task - no class balancing
-  
-  sofa_prediction:
-    num_patients: 100
-    # Regression task - no class balancing
+  - icu_los
 
 # Notes:
-# - All tasks use confidence-weighted trajectory method
-# - Results include AUROC, AUPRC, accuracy, F1, precision, recall
-# - Trajectories are saved for detailed analysis
-# - Comparison plots are generated across all tasks
-
+# - Uses direct probability method (single forward pass)
+# - Binary tasks: AUROC, AUPRC, Accuracy
+# - Regression tasks: MAE, RMSE, Correlation
+# - Seeds are set via command line (run_infer.sh uses 43-62 for 20 reps)

@@ -4,53 +4,58 @@ Electronic Health Record Foundation Model with Mixture of Experts (MoE) architec
 
 ## Evaluation
 
-### Final Comprehensive Evaluation (All Tasks)
+### Direct Probability Inference (Fast, Deterministic)
 
-Evaluate the trained model on multiple clinical prediction tasks using ETHOS-style frequency-based trajectory method:
+Evaluate the trained model on multiple clinical prediction tasks using direct probability extraction:
 
 ```bash
-# Full evaluation on all 4 tasks (100 patients each, 20 trajectories per patient)
+# Run inference on all 5 tasks with 20 repetitions each
+# Uses default config: scripts/eval_final_config.yaml
 conda activate ehr_fm
 cd /home/sud/temp_/ehr_stuff/EHR_FM
-python scripts/eval_final.py \
-  --config scripts/eval_final_config.yaml \
-  --model /home/sud/temp_/ehr_stuff/EHR_FM/outputs/2026-01-16/08-49-53_model=gpt2_small_monolith,train=monolith_million,world_size=auto/best_model.pt \
-  --output-dir eval_final_results \
-  --patient-cache eval_final_results/patient_cache.json
+sbatch scripts/run_infer.sh
 
-# Quick test run (10 patients, 5 trajectories)
-python scripts/eval_final.py \
-  --config scripts/eval_final_config.yaml \
-  --model $BEST_MODEL_PATH \
-  --num-patients 10 \
-  --num-trajectories 5 \
-  --output-dir eval_test_run \
-  --patient-cache eval_test_run/patient_cache.json
+# Or run locally (no SLURM)
+bash scripts/run_infer.sh
 
-# Evaluate specific tasks only
-python scripts/eval_final.py \
-  --config scripts/eval_final_config.yaml \
-  --model $BEST_MODEL_PATH \
-  --tasks hosp_mortality icu_mortality \
-  --output-dir eval_mortality_only
+# Use custom config
+sbatch scripts/run_infer.sh path/to/custom_config.yaml
+bash scripts/run_infer.sh scripts/eval_final_config.yaml
 ```
 
 **Tasks evaluated:**
-- `hosp_mortality` - Hospital Mortality Prediction (binary)
-- `icu_mortality` - ICU Mortality Prediction (binary)
-- `hosp_readmission` - Hospital 30-day Readmission Prediction (binary)
-- `icu_readmission` - ICU Readmission Prediction (binary)
-- `icu_los` - ICU Length of Stay Prediction in days (regression) *
-- `drg_prediction` - DRG Classification, 771 classes (multiclass) *
-- `sofa_prediction` - First-day SOFA Score Prediction (regression) *
+- `hosp_mortality` - Hospital Mortality Prediction (binary classification)
+- `icu_mortality` - ICU Mortality Prediction (binary classification)
+- `hosp_readmission` - Hospital 30-day Readmission Prediction (binary classification)
+- `icu_readmission` - ICU Readmission Prediction (binary classification)
+- `icu_los` - ICU Length of Stay Prediction in days (regression)
 
-\* Available but not in default config - uncomment in config to enable
+**Method:**
+- Single forward pass per patient (no trajectory sampling)
+- Direct softmax probability extraction
+- 10x faster than trajectory-based methods
+- Deterministic results (no sampling variance)
 
 **Output:**
-- Per-task results JSON and trajectory data
-- ROC curves comparing all tasks
-- Task comparison bar plots (AUROC, AUPRC, Accuracy, F1)
-- Evaluation summary JSON
+```
+infer_results/
+├── hosp_mortality/
+│   ├── hosp_mortality_rep1.json ... rep20.json  (20 repetitions)
+│   ├── hosp_mortality_rep1_plot.png ... rep20_plot.png  (bar charts)
+│   └── hosp_mortality_aggregated.json  (mean ± std across reps)
+├── icu_mortality/
+│   └── ...
+├── hosp_readmission/
+│   └── ...
+├── icu_readmission/
+│   └── ...
+└── icu_los/
+    └── ...
+```
+
+**Metrics:**
+- Binary tasks: AUROC, AUPRC, Accuracy
+- Regression (ICU LOS): MAE, RMSE, Pearson correlation
 
 ## Setup
 

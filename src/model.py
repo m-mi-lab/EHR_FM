@@ -298,8 +298,12 @@ class MLP(torch.nn.Module):
                 x = self.norm(x)
             
             # First linear: [n_experts_local, B, capacity, n_embd] -> [n_experts_local, B, capacity, dim_hidden*2]
-            x = torch.bmm(x.view(-1, x.shape[-2], x.shape[-1]), c_fc_slice.view(-1, c_fc_slice.shape[-2], c_fc_slice.shape[-1]))
-            x = x.view(c_fc_slice.shape[0], -1, x.shape[-2], x.shape[-1])
+            # x: [n_experts_local, B, capacity, n_embd], c_fc_slice: [n_experts_local, n_embd, dim_hidden*2]
+            n_experts_local, B, capacity, n_embd = x.shape
+            x_reshaped = x.reshape(n_experts_local * B, capacity, n_embd)
+            c_fc_expanded = c_fc_slice.unsqueeze(1).expand(n_experts_local, B, n_embd, -1).reshape(n_experts_local * B, n_embd, -1)
+            x = torch.bmm(x_reshaped, c_fc_expanded)
+            x = x.reshape(n_experts_local, B, capacity, -1)
             
             if c_fc_bias_slice is not None:
                 x = x + c_fc_bias_slice.unsqueeze(1)
@@ -308,8 +312,12 @@ class MLP(torch.nn.Module):
             x = self.geglu(x)
             
             # Second linear: [n_experts_local, B, capacity, dim_hidden] -> [n_experts_local, B, capacity, n_embd]
-            x = torch.bmm(x.view(-1, x.shape[-2], x.shape[-1]), c_proj_slice.view(-1, c_proj_slice.shape[-2], c_proj_slice.shape[-1]))
-            x = x.view(c_proj_slice.shape[0], -1, x.shape[-2], x.shape[-1])
+            # x: [n_experts_local, B, capacity, dim_hidden], c_proj_slice: [n_experts_local, dim_hidden, n_embd]
+            n_experts_local, B, capacity, dim_hidden = x.shape
+            x_reshaped = x.reshape(n_experts_local * B, capacity, dim_hidden)
+            c_proj_expanded = c_proj_slice.unsqueeze(1).expand(n_experts_local, B, dim_hidden, -1).reshape(n_experts_local * B, dim_hidden, -1)
+            x = torch.bmm(x_reshaped, c_proj_expanded)
+            x = x.reshape(n_experts_local, B, capacity, -1)
             
             if c_proj_bias_slice is not None:
                 x = x + c_proj_bias_slice.unsqueeze(1)
