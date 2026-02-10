@@ -1,30 +1,35 @@
-# train loop params
+# Default training config (long-running for MoE experiments)
+# Aligned with ETHOS hyperparameters (2026-02-06 fixes)
+# This is used when no specific train config is selected
 max_iters: 600000
 eval_interval: 2000   
 eval_iters: 200      # batches for evaluation
 log_interval: 10       
-save_checkpoints: True 
+save_checkpoints: True
+checkpoint_interval: 1000  # Save periodic checkpoints 
 
-resume_from_checkpoint: null # not required now
+resume_from_checkpoint: null
 
-# Optimizer 
+# Optimizer - matches ETHOS
 lr: 6e-4             
 weight_decay: 0.1
 beta1: 0.9
 beta2: 0.95
 grad_clip: 1.0         # 0.0 to disable 
 
-# lr
+# lr schedule
 decay_lr: True         
-warmup_iters: 2000    
+warmup_iters: 5000     # Increased for stability
 lr_decay_iters: ${train.max_iters}
-min_lr: 6e-5
+min_lr: 6e-5           # 10% of max_lr
 
-# main
-batch_size: 4096 # individual_batch_size * gradient_accumulation_steps * num_gpus --- 4096, 16 if 1 expert
-gradient_accumulation_steps: 16
-dtype: 'float16'       # 'float32', 'bfloat16', or 'float16'
-num_workers: 0      # data loaders 
+# main - per-GPU batch size (optimized for MoE)
+batch_size: 16         # Per-GPU batch size (smaller for MoE memory requirements)
+gradient_accumulation_steps: 16  # Larger effective batch
+# Effective batch per GPU: 16 × 16 = 256
+# Total effective batch (2 GPUs): 16 × 16 × 2 = 512
+dtype: 'bfloat16'      # Better for mixed precision training
+num_workers: 0         # data loaders 
 ddp_find_unused_params: False # if ddp says unused params, set to True
 out_dir: ${hydra:run.dir}
 
