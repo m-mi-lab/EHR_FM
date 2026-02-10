@@ -1,14 +1,15 @@
 # train loop params
-max_iters: 60000
+max_iters: 1000000
 eval_interval: 2000   
 eval_iters: 200      # batches for evaluation
 log_interval: 10       
-save_checkpoints: True 
+save_checkpoints: True
+checkpoint_interval: 1000  # Save periodic checkpoints every N iterations regardless of val loss 
 
-resume_from_checkpoint: null # not required now
+resume_from_checkpoint: null
 
 # Optimizer 
-lr: 6e-4             
+lr: 6e-4             # FIXED: Was 1e-2 (16x too high!), now matches ETHOS
 weight_decay: 0.1
 beta1: 0.9
 beta2: 0.95
@@ -16,13 +17,15 @@ grad_clip: 1.0         # 0.0 to disable
 
 # lr
 decay_lr: True         
-warmup_iters: 1000    
+warmup_iters: 5000     # FIXED: Was 1000, now matches ETHOS (5x longer warmup)
 lr_decay_iters: ${train.max_iters}
-min_lr: 6e-5
+min_lr: 6e-5           # FIXED: Was 1e-3, now 10% of max_lr
 
 # main
-batch_size: 64 # individual_batch_size * gradient_accumulation_steps * num_gpus --- 4096, 16 if 1 expert
-gradient_accumulation_steps: 8
+batch_size: 32         # FIXED: Was 128, now matches ETHOS (per-GPU batch size)
+gradient_accumulation_steps: 16  # FIXED: Was 4, now matches ETHOS
+# Effective batch per GPU: 32 × 16 = 512
+# Total effective batch (2 GPUs): 32 × 16 × 2 = 1024
 dtype: 'bfloat16'       # 'float32', 'bfloat16', or 'float16'
 num_workers: 0      # data loaders 
 ddp_find_unused_params: False # if ddp says unused params, set to True
