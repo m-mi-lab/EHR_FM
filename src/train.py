@@ -192,11 +192,12 @@ def train_worker(rank, world_size, cfg: DictConfig):
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=cfg.seed)
         val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False, seed=cfg.seed)
 
-        batch_size_per_gpu = cfg.train.batch_size // (world_size * cfg.train.gradient_accumulation_steps)
-        if batch_size_per_gpu < 1:
-             logger.warning(f"Calculated batch_size_per_gpu is {batch_size_per_gpu}. Setting to 1.")
-             batch_size_per_gpu = 1
+        # FIXED: batch_size in config is per-GPU batch size, not divided by world_size or gradient_accumulation_steps
+        # gradient_accumulation_steps is a training loop concept, not for DataLoader
+        batch_size_per_gpu = cfg.train.batch_size
         logger.info(f"Rank {rank} - Batch size per GPU: {batch_size_per_gpu}")
+        logger.info(f"Rank {rank} - Effective batch per GPU: {batch_size_per_gpu * cfg.train.gradient_accumulation_steps}")
+        logger.info(f"Rank {rank} - Total effective batch (all GPUs): {batch_size_per_gpu * cfg.train.gradient_accumulation_steps * world_size}")
 
         train_dataloader = DataLoader(train_dataset, batch_size=batch_size_per_gpu, sampler=train_sampler, num_workers=cfg.train.num_workers, pin_memory=True)
         val_dataloader = DataLoader(val_dataset, batch_size=batch_size_per_gpu, sampler=val_sampler, num_workers=cfg.train.num_workers, pin_memory=True)
@@ -280,7 +281,7 @@ def train_worker(rank, world_size, cfg: DictConfig):
         if ckpt_path.exists():
             logger.info(f"Rank {rank} attempting to resume from checkpoint: {ckpt_path}")
             map_location = {'cuda:%d' % 0: 'cuda:%d' % rank} if torch.cuda.is_available() else device
-            checkpoint = torch.load(ckpt_path, map_location=map_location)
+            checkpoint = torch.load(ckpt_path, map_location=map_location, weights_only=False)
             try:
                 # raw_model.load_state_dict(checkpoint['model']) # This might fail if config changed slightly
                 # Load state dict more robustly
