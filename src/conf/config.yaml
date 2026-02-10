@@ -1,6 +1,6 @@
 defaults:
-  - train: 4_exp
-  - model: gpt2_small_4exp    
+  - train: monolith  # Monolith baseline (1M iterations)
+  - model: gpt2_small_monolith
   - data: mimic_data          
   - _self_                    
 
@@ -16,5 +16,5 @@ hydra:
 project_name: EHR_FM
 seed: 42 
 
-world_size: auto # auto-detect GPUs, or set to specific number (1 for single GPU)
+world_size: auto # auto-detect GPUs, or set to specific number (1 for single GPU, 2 for dual RTX 4090)
 
