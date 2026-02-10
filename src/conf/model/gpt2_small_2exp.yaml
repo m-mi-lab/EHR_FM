@@ -1,5 +1,6 @@
-# for different models
-# _target_: transformers.GPT2Config
+# GPT2-Small with 2 experts MoE
+# Base transformer config matches ETHOS ARES
+# MoE config optimized based on best practices
 
 # vocab_size is determined during runtime
 n_positions: 2048      
@@ -9,17 +10,16 @@ n_head: 12
 # n_inner: null        # 4*n_embd if null
 activation_function: "gelu" 
 
-# Dropout
+# Dropout - matches ETHOS
 resid_pdrop: 0.3
 embd_pdrop: 0.3
 attn_pdrop: 0.3
 bias: False            # lin layer bias, not gpt2 training bias
 
-
-# MOE config
+# MOE config - 2 experts with top_k=2 (all experts active)
 n_experts: 2
-top_k: 1
-stride: 2 
+top_k: 2               # Use both experts (recommended for 2-expert setup)
+stride: 2              # Apply MoE every 2 layers
 use_aux_loss: true
 aux_loss_weight: 0.01
 use_router_z_loss: false
