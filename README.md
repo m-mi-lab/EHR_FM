@@ -2,6 +2,195 @@
 
 Electronic Health Record Foundation Model with Mixture of Experts (MoE) architecture.
 
+## 🚀 Quick Start 
+
+```bash
+# 1. Install dependencies
+conda create --name ehr_fm python=3.12
+conda activate ehr_fm
+pip install -e .[jupyter]
+
+# 2. Configure environment (.env file)
+cp env.example .env
+# Edit .env and fill in:
+#   - PHYSIONET_USERNAME and PHYSIONET_PASSWORD (required for --download)
+#   - MLFLOW_TRACKING_URI (e.g., http://localhost:5000 or remote server)
+#   - MODEL_CONFIG and TRAIN_CONFIG (defaults work fine)
+#   - Optional: S3/Tigris credentials for artifact storage
+
+# 3. Run complete pipeline (download, ETL, tokenize, train)
+./run_pipeline.sh --download
+```
+
+**That's it!** The script will:
+- ✅ Download MIMIC-IV v2.2 from PhysioNet (if `--download` flag used)
+- ✅ Run MEDS ETL pipeline to convert raw data to MEDS format
+- ✅ Tokenize patient timelines and build vocabulary
+- ✅ Train the EHR foundation model with specified configuration
+- ✅ Log all metrics to MLflow and TensorBoard
+
+**If you already have MIMIC-IV data:**
+```bash
+# Skip download, point to existing data
+# Set MIMICIV_RAW_DIR=/path/to/mimic-iv in .env, then:
+./run_pipeline.sh
+```
+
+**Training-only (skip data prep):**
+```bash
+# If data is already tokenized at data/tokenized/
+./run_pipeline.sh --skip-etl --skip-tokenization
+```
+
+**Output locations:**
+- Training checkpoints: `outputs/YYYY-MM-DD/HH-MM-SS.../`
+- MLflow experiments: Visit `MLFLOW_TRACKING_URI` in browser
+- TensorBoard logs: `outputs/.../tensorboard_logs/`
+
+### Detailed Pipeline Options
+
+The `run_pipeline.sh` script supports fine-grained control over each step:
+
+```bash
+# Available flags:
+./run_pipeline.sh --download              # Download MIMIC-IV from PhysioNet
+./run_pipeline.sh --skip-etl              # Skip MEDS ETL (use existing MEDS data)
+./run_pipeline.sh --skip-tokenization     # Skip tokenization (use existing tokenized data)
+./run_pipeline.sh --skip-training         # Skip training (only prep data)
+./run_pipeline.sh --dry-run               # Print commands without executing
+./run_pipeline.sh --help                  # Show help message
+```
+
+**Environment variable overrides (via .env or CLI):**
+```bash
+# Override vars via CLI (takes precedence over .env)
+MODEL_CONFIG=gpt2_small_8exp WORLD_SIZE=2 ./run_pipeline.sh
+
+# Or edit .env file:
+MODEL_CONFIG=gpt2_small_4exp      # Model architecture
+TRAIN_CONFIG=4_exp                # Training configuration
+WORLD_SIZE=auto                   # GPUs (auto-detect or specify number)
+N_WORKERS=4                       # ETL parallelism
+MLFLOW_TRACKING_URI=http://...    # MLflow server
+```
+
+**All configurable variables** (see `env.example` for full list):
+- `PHYSIONET_USERNAME`, `PHYSIONET_PASSWORD` - PhysioNet credentials
+- `MIMICIV_RAW_DIR`, `MIMICIV_MEDS_DIR`, `TOKENIZED_DIR` - Data paths
+- `MODEL_CONFIG` - Model architecture (`gpt2_small_4exp`, `gpt2_small_8exp`, `gpt2_small_monolith`)
+- `TRAIN_CONFIG` - Training preset (`4_exp`, `8_exp`, `monolith_million`, `tiny`)
+- `WORLD_SIZE` - Number of GPUs (`auto`, `1`, `2`)
+- `MLFLOW_TRACKING_URI` - MLflow server URL
+- `MLFLOW_EXPERIMENT_NAME` - Experiment name (default: `EHR_FM`)
+- `AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` - S3/Tigris artifact storage
+- `N_WORKERS` - Parallel workers for ETL
+- `VAL_SPLIT_FRACTION` - Validation split (default: 0.05)
+- `RESUME_CHECKPOINT` - Path to resume training from checkpoint
+
+### Monitoring Training Progress
+
+**MLflow UI** (comprehensive experiment tracking):
+```bash
+# If using local MLflow server
+mlflow ui --host 0.0.0.0 --port 5000 --backend-store-uri ./mlflow_data/mlruns
+
+# Then visit http://localhost:5000 in browser
+```
+
+**TensorBoard** (real-time metrics):
+```bash
+tensorboard --logdir outputs/ --port 6006 --bind_all
+
+# Then visit http://localhost:6006 in browser
+```
+
+**Training Logs** (live progress):
+```bash
+# Find latest training run
+ls -ltr outputs/
+
+# Tail logs
+tail -f outputs/YYYY-MM-DD/HH-MM-SS_.../train.log
+```
+
+### Expected Timeline
+
+On 2x RTX 4090 (49GB VRAM total):
+- **Download MIMIC-IV**: ~2-4 hours (depends on network)
+- **MEDS ETL**: ~30-60 minutes (with N_WORKERS=4)
+- **Tokenization**: ~20-30 minutes
+- **Training (4-expert, ~298M samples)**: 
+  - ~1.5-2 hours per epoch
+  - Total: ~10-15 hours for convergence (5-8 epochs)
+
+### Expected Timeline
+
+On 2x RTX 4090 (49GB VRAM total):
+- **Download MIMIC-IV**: ~2-4 hours (depends on network)
+- **MEDS ETL**: ~30-60 minutes (with N_WORKERS=4)
+- **Tokenization**: ~20-30 minutes
+- **Training (4-expert, ~298M samples)**: 
+  - ~1.5-2 hours per epoch
+  - Total: ~10-15 hours for convergence (5-8 epochs)
+
+### Troubleshooting
+
+**Problem: PhysioNet download fails with 401 Unauthorized**
+- Verify your PhysioNet account has credentialed access to MIMIC-IV v2.2
+- Complete required training: https://physionet.org/about/citi-course/
+- Check username/password in `.env` (no quotes needed)
+
+**Problem: MEDS ETL fails with "file not found"**
+- Verify `MIMICIV_RAW_DIR` contains `hosp/` and `icu/` subdirectories
+- Check file structure: `$MIMICIV_RAW_DIR/hosp/admissions.csv` should exist
+- If files are `.gz` compressed, set `DO_UNZIP=true` in `.env`
+
+**Problem: Training hangs or doesn't start**
+- Check GPU availability: `nvidia-smi` (should show 2 GPUs)
+- Verify CUDA setup: `python -c "import torch; print(torch.cuda.is_available())"`
+- Try single-GPU mode: `WORLD_SIZE=1 ./run_pipeline.sh --skip-etl --skip-tokenization`
+- Check MASTER_PORT is available (default: 23556): `netstat -tuln | grep 23556`
+
+**Problem: MLflow connection errors**
+- Verify `MLFLOW_TRACKING_URI` is reachable: `curl $MLFLOW_TRACKING_URI`
+- Start local MLflow server: `mlflow ui --host 0.0.0.0 --port 5000`
+- For remote servers, check firewall/VPN settings
+
+**Problem: Out of memory (OOM) during training**
+- Reduce batch size in training config (e.g., use `TRAIN_CONFIG=8_exp` for smaller batches)
+- Use single-GPU mode: `WORLD_SIZE=1`
+- Try smaller model: `MODEL_CONFIG=gpt2_small_monolith`
+- Check GPU memory usage: `nvidia-smi -l 1` (should not exceed 24GB per GPU)
+
+**Problem: Tokenization fails or produces empty files**
+- Verify MEDS data structure: `ls $MIMICIV_MEDS_DIR/data/train/` should have `.parquet` files
+- Check tokenization logs for errors
+- Ensure sufficient disk space (tokenization writes large files)
+
+**Problem: Training loss not decreasing**
+- ✅ **CRITICAL**: As of Feb 6, 2026, batch_size calculation bug has been fixed (line 195 in `src/train.py`)
+- Verify learning rate: should be ~6e-4 (NOT 1e-2)
+- Check validation loss: should decrease within first few steps
+- Inspect MLflow/TensorBoard: look for gradient flow, check aux losses
+
+**Problem: Checkpoint not loading (vocab mismatch)**
+- Ensure checkpoint was saved from same vocabulary
+- Check `vocab_stoi` key exists in checkpoint dict
+- Verify vocabulary size is padded to multiple of 64
+
+**Problem: DDP (multi-GPU) hangs at initialization**
+- Check `MASTER_ADDR` and `MASTER_PORT` environment variables
+- Ensure both GPUs are visible: `CUDA_VISIBLE_DEVICES=0,1 nvidia-smi`
+- Try setting explicitly: `MASTER_ADDR=localhost MASTER_PORT=23556 ./run_pipeline.sh`
+- Verify network connectivity between processes (rarely an issue on single machine)
+
+**Getting help:**
+- Check existing logs: `outputs/.../train.log`
+- Review MLflow experiment page for detailed metrics
+- See `.github/copilot-instructions.md` for architecture details
+
+---
+
 ## Evaluation
 
 ### Direct Probability Inference (Fast, Deterministic)
@@ -57,179 +246,6 @@ infer_results/
 - Binary tasks: AUROC, AUPRC, Accuracy
 - Regression (ICU LOS): MAE, RMSE, Pearson correlation
 
-## Setup
-
-### Local Development Setup
-```bash
-conda deactivate 
-conda create --name MEDS python=3.12 
-conda activate MEDS 
-pip install -e .[jupyter] 
-```
-
-### Docker Compose Setup
-
-The project includes Docker Compose configuration for running training with MLflow tracking.
-
-#### Prerequisites
-- Docker and Docker Compose installed
-- NVIDIA Docker runtime (`nvidia-docker2` or `nvidia-container-toolkit`) for GPU support
-- NVIDIA drivers installed
-
-#### Quick Start
-
-1. **Configure environment variables** (optional):
-   ```bash
-   cp .env.example .env
-   # Edit .env with your paths and settings
-   ```
-
-2. **Build and start services**:
-   ```bash
-   docker-compose up -d --build
-   ```
-   This starts the MLflow server and the training container (which stays running but doesn't start training automatically).
-
-3. **Enter the training container**:
-   ```bash
-   docker exec -it ehr_fm_training bash
-   ```
-
-4. **Run training inside the container**:
-   ```bash
-   # Inside the container, you can run training with your desired arguments:
-   python -m src.train
-   # Or with custom configurations:
-   python -m src.train model=gpt2_small_8exp train=8_exp world_size=1
-   ```
-
-5. **Access MLflow UI**:
-   - Open browser to `http://localhost:5000` (or the port specified in `.env`)
-
-6. **Access TensorBoard**:
-   - Open browser to `http://localhost:6006` (or the port specified in `.env`)
-   - TensorBoard automatically scans all subdirectories in `outputs/` for tensorboard logs
-
-#### Alternative: Run container interactively from start
-
-If you prefer to start the container in interactive mode immediately:
-
-```bash
-docker-compose run --rm training bash
-```
-
-This creates a new container, starts it with bash, and removes it when you exit.
-
-#### Docker Compose Services
-
-- **training**: Main training container with CUDA support
-  - Uses `nvidia/cuda:11.6.2-base-ubuntu20.04` base image
-  - GPU access via `nvidia` runtime
-  - IPC host mode enabled for PyTorch DDP
-  - Mounts data, outputs, and config directories
-  - Container stays running for interactive use (does not auto-start training)
-  - Enter with: `docker exec -it ehr_fm_training bash`
-
-- **mlflow**: MLflow tracking server
-  - Tracks experiments, metrics, and artifacts
-  - Persists data to `mlflow_data/` directory
-  - Accessible at `http://localhost:5000`
-
-- **tensorboard**: TensorBoard visualization server
-  - Visualizes training metrics and profiler traces
-  - Reads from `outputs/` directory (scans all subdirectories)
-  - Accessible at `http://localhost:6006`
-
-#### Volume Mounts
-
-- `DATA_DIR` (default: `./data`): Read-only data directory
-- `OUTPUTS_DIR` (default: `./outputs`): Training outputs, checkpoints, logs
-- `MLFLOW_DATA_DIR` (default: `./mlflow_data`): MLflow backend store and artifacts
-- `EHR_STUFF_DIR` (default: `./ehr_stuff`): Additional data directory (based on previous setup)
-
-#### Environment Variables
-
-See `.env.example` for available configuration options:
-- `CUDA_VISIBLE_DEVICES`: GPU selection (e.g., "0", "0,1", "all")
-- `MLFLOW_PORT`: MLflow server port (default: 5000)
-- `TENSORBOARD_PORT`: TensorBoard server port (default: 6006)
-- `MLFLOW_EXPERIMENT_NAME`: MLflow experiment name (default: EHR_FM)
-- `DATA_DIR`, `OUTPUTS_DIR`, `MLFLOW_DATA_DIR`, `EHR_STUFF_DIR`: Directory paths for volumes
-
-## Data Preparation
-
-```bash
-python3 -m src.tokenizer.run_tokenization --config-name=tokenization_train
-```
-
-## Training
-
-### Basic Training
-```bash
-python3 -m src.train
-```
-
-### Experiment Configuration
-
-The training system uses Hydra configuration management. You can override default configurations:
-
-```bash
-# Run with different model and training configurations
-python3 -m src.train model=gpt2_small_8exp train=8_exp world_size=1
-python3 -m src.train model=gpt2_small_4exp train=4_exp world_size=auto
-```
-
-### Available Configurations
-
-**Model Configurations:**
-- `gpt2_small_4exp`: 4-expert MoE model
-- `gpt2_small_8exp`: 8-expert MoE model
-
-**Training Configurations:**
-- `4_exp`: Training config optimized for 4-expert models
-- `8_exp`: Training config optimized for 8-expert models (reduced batch size for memory efficiency)
-- `default`: Standard training configuration
-
-### Experiment Output
-
-Experiments are automatically saved to timestamped directories:
-```
-outputs/YYYY-MM-DD/HH-MM-SS_model=MODEL,train=TRAIN,world_size=N/
-├── train.log              # Training logs
-├── tensorboard_logs/       # TensorBoard metrics
-├── profiler_traces/        # PyTorch profiler traces
-├── ckpt_*.pt              # Regular checkpoints
-├── best_model.pt          # Best validation loss model
-└── final_model.pt         # Final model
-```
-
-### MLflow Integration
-
-When running with Docker Compose (or with `MLFLOW_TRACKING_URI` environment variable set), training automatically logs to MLflow:
-- **Parameters**: All Hydra configuration parameters
-- **Metrics**: Training/validation losses, learning rates, throughput, latency, GPU memory
-- **Artifacts**: Model checkpoints (best_model.pt)
-- **Tags**: Model type, world_size, dtype
-
-Access the MLflow UI at `http://localhost:5000` to view experiments and compare runs.
-
-### TensorBoard Integration
-
-Training also logs to TensorBoard (runs in parallel with MLflow):
-- **Metrics**: All training/validation metrics, learning rates, throughput, latency
-- **Profiler Traces**: PyTorch profiler traces for performance analysis
-- **Model Info**: Model type, expert configuration, loss weights
-
-Access TensorBoard at `http://localhost:6006` to visualize training progress. TensorBoard automatically discovers all runs in the `outputs/` directory.
-
-### Key Features
-
-- **Mixture of Experts (MoE)**: Scalable architecture with expert routing
-- **Memory Optimized**: Configurations tuned for different GPU memory constraints
-- **Comprehensive Logging**: TensorBoard metrics, MLflow tracking, profiler traces, and detailed logs
-- **Automatic Checkpointing**: Regular saves and best model preservation
-- **MIMIC Dataset**: Trained on large-scale EHR data (~298M samples)
-- **Docker Support**: Containerized training with GPU support and MLflow integration
 
 ## Mortality Prediction
 
@@ -289,3 +305,30 @@ Results are saved to the specified `output_dir` containing:
 - Generated trajectory samples
 - Model comparison statistics
 - Detailed logs
+
+---
+
+### For Inference/Evaluation
+
+```bash
+# Activate environment
+conda activate ehr_fm
+
+# Run evaluation on all tasks
+bash scripts/run_infer.sh
+
+# Or single task inference
+python scripts/infer.py --test hosp_mortality --model outputs/.../best_model.pt --data-dir data/tokenized/mimic_train --output infer_results
+```
+
+---
+## Support & Documentation
+
+- **Quick help**: `./run_pipeline.sh --help` or `./verify_setup.sh`
+- **Architecture details**: [.github/copilot-instructions.md](.github/copilot-instructions.md)
+- **Configuration reference**: `src/conf/` directory
+- **Issues & bugs**: Check training logs and MLflow experiment pages
+
+## License
+
+See LICENSE file for details.
