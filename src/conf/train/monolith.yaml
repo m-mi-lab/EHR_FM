@@ -6,7 +6,7 @@ log_interval: 10
 save_checkpoints: True
 checkpoint_interval: 1000  # Save periodic checkpoints every N iterations regardless of val loss 
 
-resume_from_checkpoint: null
+resume_from_checkpoint: /home/sud/temp_/ehr_stuff/EHR_FM/outputs/2026-02-10/23-26-42_model=gpt2_small_monolith,train=monolith,world_size=2/ckpt_4000.pt
 
 # Optimizer 
 lr: 6e-4             # FIXED: Was 1e-2 (16x too high!), now matches ETHOS
@@ -22,10 +22,10 @@ lr_decay_iters: ${train.max_iters}
 min_lr: 6e-5           # FIXED: Was 1e-3, now 10% of max_lr
 
 # main
-batch_size: 32         # FIXED: Was 128, now matches ETHOS (per-GPU batch size)
-gradient_accumulation_steps: 16  # FIXED: Was 4, now matches ETHOS
-# Effective batch per GPU: 32 × 16 = 512
-# Total effective batch (2 GPUs): 32 × 16 × 2 = 1024
+batch_size: 16         # Reduced from 32 for 24GB GPU memory (2x RTX 4090)
+gradient_accumulation_steps: 32  # Increased from 16 to maintain effective batch
+# Effective batch per GPU: 16 × 32 = 512 (same as ETHOS)
+# Total effective batch (2 GPUs): 16 × 32 × 2 = 1024 (matches ETHOS)
 dtype: 'bfloat16'       # 'float32', 'bfloat16', or 'float16'
 num_workers: 0      # data loaders 
 ddp_find_unused_params: False # if ddp says unused params, set to True
