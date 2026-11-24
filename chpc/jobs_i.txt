@@ -1,0 +1,21 @@
+# CHPC job list for the Oct-8 1-GPU session (i): takes bertl over from session f (which expires ~18:00 MDT Oct 8) via a lossless
+# epoch-boundary handover, then runs bertl's finetune/leak/sweep chain once the pretrain is CONVERGED.
+#   JOBS=chpc/jobs_i.txt SUPERVISE_LOG=logs/supervise_i.log MLFLOW_SUFFIX=_i nohup bash chpc/supervise.sh >> logs/supervise_i.log 2>&1 &
+memlimit 128
+pretrain bertl 0 wait:stop_bertl_i
+sweep bertl 0 mortality los_gt_7d readmit_30d
+# 2026-10-08 15:05 MDT: visit-level families A2 / B2 / B2o (remove only) for the models whose window holds >= 3 complete prior
+# visits (context >= 1,024: 4 % of records at 1,024, 11 % at 2,048, 19 % at 4,096; 1 % at 512, so BERT and BiLSTM are
+# excluded). Scored on the >= 3-visit subset (MIN_VISITS=3) so the six doses are graded in visits. Results: <task>.visits.json.
+sweepx mistrals 0 A2,B2,B2o mortality los_gt_7d readmit_30d
+sweepx mambas 0 A2,B2,B2o mortality los_gt_7d readmit_30d
+sweepx mamba 0 A2,B2,B2o mortality los_gt_7d readmit_30d
+sweepx mistral 0 A2,B2,B2o mortality los_gt_7d readmit_30d
+sweepx mambal 0 A2,B2,B2o mortality los_gt_7d readmit_30d
+sweepx bigbird 0 A2,B2,B2o mortality los_gt_7d readmit_30d
+# 2026-10-08 14:50 MDT: GPT-2 family added (its 1,024-token window holds three prior visits for 4 % / 8 % of mortality / readmission records).
+sweepx gpt2s 0 A2,B2,B2o mortality los_gt_7d readmit_30d
+sweepx gpt2 0 A2,B2,B2o mortality los_gt_7d readmit_30d
+sweepx gpt2l 0 A2,B2,B2o mortality los_gt_7d readmit_30d
+pretrain gpt2l 0 unless:stop_gpt2l_j
+stop gpt2l epoch to:j

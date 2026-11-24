@@ -1,0 +1,11 @@
+defaults: [_base]
+family: A1
+name: graded_random_content
+regime: MCAR
+description: >
+  Uniform withholding over clinical content. THE REFERENCE CURVE: every other
+  family is read as a vertical deviation from A1 at its own realized dose.
+mechanism: {Z: constant, score: zero, beta: 0.0}
+eligible: content            # all non-structural tokens
+protocols: [event]
+twin: null                   # A1 IS the matched-budget twin for everything else

@@ -1,0 +1,17 @@
+# CHPC job list, read by chpc/supervise.sh every cycle. One session with 128 GB memory runs all of it;
+# on a 16 GB session the supervisor skips what cannot load and runs the rest.
+#   pretrain <arch> <gpu> | sweep <arch> <gpu> <task ...> | memlimit <GB> (fallback when Slurm variables are absent)
+memlimit 128
+pretrain mambas 0
+pretrain mistrals 0
+pretrain mamba 1
+sweep gpt2 1 mortality los_gt_7d readmit_30d
+sweep mistrals 0 mortality los_gt_7d readmit_30d
+sweep mambas 0 mortality los_gt_7d readmit_30d
+sweep mamba 1 mortality los_gt_7d readmit_30d
+pretrain gpt2l 0
+pretrain mambal 1
+# --- end of the roster (lowest priority): berts + bilstms run on the lab box; enable the rest when a card is free
+# pretrain bigbird 1
+# pretrain bertl 1
+# pretrain bilstml 1

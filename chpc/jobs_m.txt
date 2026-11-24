@@ -1,0 +1,5 @@
+memlimit 128
+sweep gpt2l 0 mortality los_gt_7d readmit_30d
+sweep bigbird 1 mortality los_gt_7d readmit_30d
+sweepx gpt2l 0 A2,B2,B2o mortality los_gt_7d readmit_30d
+sweepx bigbird 1 A2,B2,B2o mortality los_gt_7d readmit_30d

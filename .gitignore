@@ -1,0 +1,21 @@
+data/
+logs/
+*.db
+*.db-journal
+chpc_code.tar
+.venv
+__pycache__/
+*.pyc
+cache/
+mlruns/
+*.pt
+*.tar
+raw/
+mlartifacts/
+
+# never commit patient-level data or run outputs
+deprecated/
+*.parquet
+*.npz
+*.csv
+*.csv.gz

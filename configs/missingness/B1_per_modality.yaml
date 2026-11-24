@@ -1,0 +1,18 @@
+defaults: [_base]
+family: B1
+name: per_modality
+regime: MAR
+description: >
+  Graded withholding within one modality. Conditions on the observed code class,
+  hence MAR. Graded (not all-or-nothing) so positivity holds.
+mechanism: {Z: modality, score: indicator, beta: 4.0}
+# VERIFIED prefixes. 'MED'/'PROC' matched nothing -- the vocabulary uses
+# MEDICATION// and PROCEDURE//, and adds two infusion classes.
+modalities: [LAB, MEDICATION, PROCEDURE, DIAGNOSIS, INFUSION_START, INFUSION_END]
+eligible: content
+protocols: [event]
+twin: A1
+notes: >
+  The deterministic variant (withhold ALL of a modality) is retained only as a
+  declared boundary case: it violates positivity and is classified but not
+  ignorable.

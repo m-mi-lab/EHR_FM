@@ -1,0 +1,13 @@
+defaults: [_base]
+family: A3
+name: burst_run
+regime: MCAR
+description: >
+  Contiguous runs (Gilbert two-state channel). Mean run length is decoupled from
+  the marginal rate via p = 1/L, so dose and clustering vary independently.
+  Fills a genuine gap: mice::ampute assumes i.i.d. rows and has no longitudinal
+  extension.
+mechanism: {Z: constant, score: zero, beta: 0.0, burst: {mean_run_len: [2, 5, 20]}}
+eligible: content
+protocols: [event]
+twin: A1                     # A1 at matched dose isolates clustering from dose

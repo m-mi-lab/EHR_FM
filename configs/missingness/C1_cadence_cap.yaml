@@ -1,0 +1,20 @@
+defaults: [_base]
+family: C1
+name: cadence_repeat_suppression
+regime: MNAR
+description: >
+  Keep the first k occurrences per (subject, code STEM, day); withhold repeats.
+  MNAR via the latent state: whether a repeat is ordered depends on the
+  clinician's posterior over instability, which also drives the outcome.
+mechanism: {Z: latent_clinician_concern, score: repeat_index, k: [1, 2, 3, 4]}
+group_by: [subject_id, code_stem, calendar_day]
+code_stem_strip: '//_Q_\d+$'   # group on the STEM: a patient whose potassium
+                               # swings would otherwise have each decile counted
+                               # as a separate first occurrence and escape the cap
+eligible: content
+protocols: [event]
+twin: A1
+report: >
+  Publish the per-patient deletion fraction split by label. That number IS the
+  MNAR-ness of the arm and pre-empts "how do you know this isn't just more
+  deletion".

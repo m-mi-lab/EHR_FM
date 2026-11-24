@@ -1,0 +1,12 @@
+# CHPC job list for the LARGE session (request 128 GB memory, 2 GPUs). Start its supervisor with:
+#   JOBS=chpc/jobs_big.txt SUPERVISE_LOG=logs/supervise_b.log MLFLOW_SUFFIX=_b nohup bash chpc/supervise.sh > logs/supervise_b.log 2>&1 &
+memlimit 128
+stop gpt2l
+stop mambal
+# --- handover from the 16 GB session (ends 2026-09-30 15:10 MDT): launched here only once its processes are gone
+pretrain mamba 0
+redo mistrals readmit_30d
+redo mambas readmit_30d
+sweep mistrals 1 mortality los_gt_7d readmit_30d
+sweep mambas 1 mortality los_gt_7d readmit_30d
+sweep mamba 0 mortality los_gt_7d readmit_30d

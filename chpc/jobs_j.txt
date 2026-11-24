@@ -1,0 +1,14 @@
+# CHPC job list for the 2-GPU session that replaces g (g expires Oct 9). Live handover of gpt2l and bigbird at an epoch
+# boundary (jobs_g.txt carries the matching "stop <arch> epoch to:j" lines and unless-guards), then their chains.
+#   JOBS=chpc/jobs_j.txt SUPERVISE_LOG=logs/supervise_j.log MLFLOW_SUFFIX=_j nohup bash chpc/supervise.sh >> logs/supervise_j.log 2>&1 &
+# If g dies before a stop fires, the wait markers never appear: ONLY THEN run
+#   touch ~/ICLR/logs/stop_gpt2l_j.done ~/ICLR/logs/stop_bigbird_j.done
+memlimit 128
+pretrain gpt2l 0 wait:stop_gpt2l_j
+pretrain bigbird 1 wait:stop_bigbird_j
+sweep bertl 0 mortality los_gt_7d readmit_30d
+sweep gpt2l 0 mortality los_gt_7d readmit_30d
+sweep bigbird 1 mortality los_gt_7d readmit_30d
+redo gpt2l mortality
+redo bigbird mortality
+redo bigbird los_gt_7d

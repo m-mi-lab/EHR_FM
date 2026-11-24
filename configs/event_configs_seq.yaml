@@ -1,0 +1,258 @@
+subject_id_col: subject_id
+
+hosp/diagnoses_icd:
+  diagnosis:
+    code:
+      - DIAGNOSIS
+      - col(icd_code)
+    time: col(hadm_discharge_time)
+    time_format: "%Y-%m-%d %H:%M:%S"
+
+hosp/labevents:
+  lab:
+    code:
+      - LAB
+      - col(itemid)
+    time: col(charttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    numeric_value: valuenum
+
+hosp/patients:
+  dob:
+    code: MEDS_BIRTH # This is the MEDS official code for birth.
+    time: col(year_of_birth)
+    time_format: "%Y"
+  death:
+    code: MEDS_DEATH # This is the MEDS official code for death.
+    time: col(dod)
+    time_format:
+      - "%Y-%m-%d %H:%M:%S"
+      - "%Y-%m-%d"
+
+hosp/prescriptions:
+  medication_start:
+    code:
+      - MEDICATION
+      - START
+      - col(ndc)
+    time: col(starttime)
+    time_format:
+      - "%Y-%m-%d %H:%M:%S"
+      - "%Y-%m-%d"
+  medication_stop:
+    code:
+      - MEDICATION
+      - STOP
+      - col(ndc)
+    time: col(stoptime)
+    time_format:
+      - "%Y-%m-%d %H:%M:%S"
+      - "%Y-%m-%d"
+
+hosp/procedures_icd:
+  procedure:
+    code:
+      - PROCEDURE
+      - col(icd_code)
+    time: col(chartdate)
+    time_format: "%Y-%m-%d"
+
+hosp/transfers:
+  transfer:
+    code:
+      - TRANSFER_TO
+      - col(eventtype)
+      - col(careunit)
+    time: col(intime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+
+icu/icustays:
+  icu_admission:
+    code:
+      - ICU
+      - admit
+    time: col(intime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+  icu_discharge:
+    code:
+      - ICU
+      - discharge
+    time: col(outtime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+
+icu/chartevents:
+  event:
+    code:
+      - LAB
+      - col(itemid)
+    time: col(charttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    numeric_value: valuenum
+
+icu/procedureevents:
+  start:
+    code:
+      - PROCEDURE
+      - START
+      - col(itemid)
+    time: col(starttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+  end:
+    code:
+      - PROCEDURE
+      - END
+      - col(itemid)
+    time: col(endtime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+
+icu/inputevents:
+  input_start:
+    code:
+      - INFUSION_START
+      - col(itemid)
+    time: col(starttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+  input_end:
+    code:
+      - INFUSION_END
+      - col(itemid)
+    time: col(endtime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+
+hosp/microbiologyevents:
+  # Three separable events so the reflex/cascade dependency is expressible:
+  #   culture ordered -> organism grown -> antibiotic sensitivity reported.
+  # A sensitivity panel only exists when the culture grew something, which is a
+  # genuine parent->child structure in the record (family C4). charttime is null
+  # for a minority of rows; chartdate is the documented fallback.
+  culture:
+    code:
+      - MICRO
+      - CULTURE
+      - col(spec_type_desc)
+    time: col(charttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+  organism:
+    code:
+      - MICRO
+      - ORGANISM
+      - col(org_name)
+    time: col(charttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+  sensitivity:
+    code:
+      - MICRO
+      - AB
+      - col(ab_name)
+      - col(interpretation)
+    time: col(charttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+
+# ---------------------------------------------------------------------------
+# Added 2026-09-08: every remaining MIMIC-IV table that carries a patient event
+# with a usable timestamp. Previously only 11 of 26 tables were mapped, which
+# was inherited from the stock MEDS_transforms example, not a deliberate choice.
+# ---------------------------------------------------------------------------
+
+hosp/admissions:
+  # There was no explicit admission/discharge event in the corpus at all --
+  # encounter structure came only from TRANSFER_TO and ICU//*.
+  admission:
+    code:
+      - HOSPITAL_ADMISSION
+      - col(admission_type)
+    time: col(admittime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+  discharge:
+    code:
+      - HOSPITAL_DISCHARGE
+      - col(discharge_location)
+    time: col(dischtime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+
+hosp/services:
+  service:
+    code:
+      - SERVICE
+      - col(curr_service)
+    time: col(transfertime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+
+hosp/omr:
+  # Outpatient vitals (BP, weight, BMI). chartdate only -- no clock time.
+  omr:
+    code:
+      - OMR
+      - col(result_name)
+    time: col(chartdate)
+    time_format: "%Y-%m-%d"
+
+hosp/hcpcsevents:
+  hcpcs:
+    code:
+      - HCPCS
+      - col(hcpcs_cd)
+    time: col(chartdate)
+    time_format: "%Y-%m-%d"
+
+hosp/poe:
+  # Provider order entry: what was ORDERED, distinct from what was given.
+  order:
+    code:
+      - ORDER
+      - col(order_type)
+    time: col(ordertime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+
+hosp/emar:
+  # Administration (vs prescriptions = ordering). event_txt is the outcome
+  # (Administered / Not Given / Delayed ...), which is the informative field;
+  # `medication` is free text with very high cardinality.
+  emar:
+    code:
+      - EMAR
+      - col(event_txt)
+    time: col(charttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+
+hosp/pharmacy:
+  pharmacy:
+    code:
+      - PHARMACY
+      - col(route)
+    time: col(starttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+
+icu/outputevents:
+  # Fluid OUT. inputevents was mapped and this was not, so the model saw fluids
+  # in and never out -- fluid balance is a core ICU signal.
+  output:
+    code:
+      - OUTPUT
+      - col(itemid)
+    time: col(charttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    numeric_value: value
+
+icu/datetimeevents:
+  datetime_event:
+    code:
+      - DATETIME
+      - col(itemid)
+    time: col(charttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+
+icu/ingredientevents:
+  ingredient_start:
+    code:
+      - INGREDIENT_START
+      - col(itemid)
+    time: col(starttime)
+    time_format: "%Y-%m-%d %H:%M:%S"
+    numeric_value: amount
+  ingredient_end:
+    code:
+      - INGREDIENT_END
+      - col(itemid)
+    time: col(endtime)
+    time_format: "%Y-%m-%d %H:%M:%S"

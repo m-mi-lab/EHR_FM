@@ -1,0 +1,13 @@
+# CHPC job list for the THIRD session (2 GPUs): bigbird + bertl on GPU 1, mambal (moved from the Sep-29 session) on GPU 0.
+#   JOBS=chpc/jobs_c.txt SUPERVISE_LOG=logs/supervise_c.log MLFLOW_SUFFIX=_c nohup bash chpc/supervise.sh >> logs/supervise_c.log 2>&1 &
+memlimit 128
+reset bigbird
+reset bertl
+reset bertl v2
+pretrain bigbird 1
+rewind bertl 4
+pretrain bertl 1
+pretrain mambal 0
+pull_pretrain mistral
+sweep mistral 0 mortality los_gt_7d readmit_30d
+sweep gpt2s 0 mortality los_gt_7d readmit_30d

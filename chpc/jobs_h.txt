@@ -1,0 +1,8 @@
+# CHPC job list for the Oct-6 1-GPU 100-h session: takes mambal over from the Oct-5 2-GPU session (lossless handover), which
+# frees the card mistral's finetune/sweep chain was sharing.
+#   JOBS=chpc/jobs_h.txt SUPERVISE_LOG=logs/supervise_h.log MLFLOW_SUFFIX=_h nohup bash chpc/supervise.sh >> logs/supervise_h.log 2>&1 &
+memlimit 128
+pretrain mambal 0 wait:stop_mambal_h
+# 2026-10-07: once mambal is CONVERGED here, its finetune/leak/sweep chain runs on this card (sweep.sh gives mambal --bs 16 --accum 4, effective batch 64).
+# 2026-10-09 15:50 MDT: sweep line parked while the original mortality sweep (pid 747806, no wrapper) finishes; the rest of the chain runs in session k
+# sweep mambal 0 mortality los_gt_7d readmit_30d

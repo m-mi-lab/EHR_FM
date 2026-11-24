@@ -1,0 +1,14 @@
+# CHPC job list for the Oct-5 1-GPU 128 GB session: bigbird and bertl share the card. bertl restarts FROM SCRATCH (reset v3, 2026-10-06)
+# on the same schedule (lr 5e-5, warm-up 2000, eps 1e-6).
+#   JOBS=chpc/jobs_f.txt SUPERVISE_LOG=logs/supervise_f.log MLFLOW_SUFFIX=_f nohup bash chpc/supervise.sh >> logs/supervise_f.log 2>&1 &
+memlimit 128
+stop bigbird epoch to:g
+pretrain bigbird 0 unless:stop_bigbird_g
+reset bertl v3
+pretrain bertl 0 unless:stop_bertl_i
+# 2026-10-07: bertl chain starts automatically once its pretrain is CONVERGED.
+sweep bertl 0 mortality los_gt_7d readmit_30d
+# 2026-10-08 12:45 MDT: hand bertl to the new 1-GPU session i after its next epoch save (this session expires ~18:00).
+stop bertl epoch to:i
+# 2026-10-08 14:02 MDT: f relaunched bertl after the handover (missing unless-guard); kill that duplicate now, i keeps the run. (to:i2 waited for a session i2 that does not exist; a plain marker tag fires at once.)
+stop bertl now dup1

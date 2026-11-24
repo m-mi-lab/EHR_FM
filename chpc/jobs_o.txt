@@ -1,0 +1,7 @@
+memlimit 128
+pretrain mistrall 1
+sweepe gpt2l 0 mortality los_gt_7d readmit_30d
+sweepe mambal 0 mortality los_gt_7d readmit_30d
+sweepe gpt2 0 mortality los_gt_7d readmit_30d
+sweepe mistral 1 mortality los_gt_7d readmit_30d
+sweepe mamba 1 mortality los_gt_7d readmit_30d

@@ -1,0 +1,7 @@
+# CHPC job list for the spare 2-GPU session (OnDemand 20650250): the rest of the mambal chain while h finishes its mortality sweep. mambal is converged, so
+# this is only the finetune/leak/sweep chain, which skips finished tasks and resumes a killed sweep from its per-cell checkpoint.
+#   JOBS=chpc/jobs_k.txt SUPERVISE_LOG=logs/supervise_k.log MLFLOW_SUFFIX=_k nohup bash chpc/supervise.sh >> logs/supervise_k.log 2>&1 &
+memlimit 128
+sweep mambal 0 los_gt_7d readmit_30d
+pretrain bigbird 1 unless:stop_bigbird_j
+stop bigbird epoch to:j

@@ -1,0 +1,76 @@
+# Base missingness-simulation config, shared by every family.
+# Perturbation acts on the TENSORIZED EIC stream (batch["code"], batch["mask"]),
+# after tensorization -- see docs/missingness.md section 1 for why this seam.
+defaults:
+  - _self_
+
+data:
+  eic_dir:   ${oc.env:ICLR_ROOT,.}/data/eic
+  meds_dir:  ${oc.env:ICLR_ROOT,.}/data/MEDS
+  vocab_fp:  ${data.eic_dir}/metadata/codes.parquet
+  split:     held_out          # never perturb train
+
+# Vocabulary-derived lookups, built once at startup.
+vocab:
+  # tokens with a decile suffix carry a value to condition on; the rest do not
+  decile_regex: '//_Q_(\d+)$'
+  # structural tokens, taken from the EIC config's own filter list rather than invented
+  # VERIFIED against metadata/codes.parquet. The EIC config's documented
+  # filter list names HOSPITAL_ADMISSION / ED_* / ICU_ADMISSION etc, but this
+  # extraction emits NONE of those -- encounter structure arrives as
+  # TRANSFER_TO//* (16 codes) and ICU//admit|discharge (2).
+  structural_prefixes:
+    - MEDS_DEATH        # 1 code
+    - MEDS_BIRTH        # 1
+    - TIME              # 24  (TIME//START//TOKEN, TIME//DELTA//TOKEN//_Q_k)
+    - TRANSFER_TO       # 16
+    - ICU               # 2   (ICU//admit, ICU//discharge)
+  protect_structural: true      # F3-type families override this
+
+# The amputation operator: logit P(withhold) = alpha + beta * s(Z)
+# alpha is SOLVED by bisection so the realized marginal rate equals `frac`.
+mechanism:
+  link: logit
+  alpha: null                   # solved at runtime; never set by hand
+  beta: 0.0                     # 0 => MCAR, nested. Sweep this at fixed frac.
+  alpha_search: [-8.0, 8.0]     # same bracket mice::ampute uses
+  calibration_tol: 0.01
+
+protocols: [event]
+fracs:  [0.0, 0.1, 0.25, 0.5, 0.75, 0.9]
+betas:  [0.0, 1.0, 2.0, 4.0]    # breakdown-value sweep
+draws:  10
+seed:   42
+
+assertions:                     # all abort, none warn
+  realized_fraction: true
+  pooling_index_valid: true
+  null_arm_bit_exact: true      # frac=0 must reproduce clean LOGITS to 1e-6
+  weight_sha_identical: true
+  vocab_hash_matches: true
+  mechanism_fired: true         # withheld vs retained score histogram
+  calibration_held: true
+  monotonicity_guard: true
+
+record_per_cell:
+  - family
+  - regime
+  - protocol
+  - frac
+  - beta
+  - alpha_solved
+  - realized_fraction
+  - realized_score_histogram
+  - eligible_pool_size
+  - seed
+  - draw_id
+  - checkpoint_sha
+  - vocab_hash
+  - n_patients
+
+# Vocabulary facts, measured 2026-09-08 (vocab 3,890 = 2,886 fused + 1,004 plain, 21 tables):
+#   LAB 2752 | MEDICATION 254 | DIAGNOSIS 38 | INFUSION_END 30 | INFUSION_START 30
+#   PROCEDURE 24 | TIME 24 | TRANSFER_TO 16 | ICU 2 | MEDS_BIRTH 1 | MEDS_DEATH 1
+# ONLY LAB (334 stems) and TIME//DELTA//TOKEN carry deciles. Medications,
+# procedures, diagnoses and infusions have no numeric value, so every
+# value-conditioned family (C3) is necessarily lab-only.

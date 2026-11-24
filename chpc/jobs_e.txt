@@ -1,0 +1,19 @@
+# CHPC job list for a NEW 2-GPU 128 GB session (the Oct-1 sessions ended on Oct 4). Large pretrains + the two medium chains.
+# 2026-10-06 20:50 MDT: mistral readmit_30d moved to session g (idle card there); the sweep.sh already running here still lists it and will skip it once g has shipped its results.
+#   JOBS=chpc/jobs_e.txt SUPERVISE_LOG=logs/supervise_e.log MLFLOW_SUFFIX=_e nohup bash chpc/supervise.sh >> logs/supervise_e.log 2>&1 &
+memlimit 128
+rm data/models/gpt2_ft
+rm data/models/mambas_ft
+rm data/models/mistrals_ft
+rm data/models/mamba_pretrain/last.pt
+rm data/models/mambas_pretrain/last.pt
+rm data/models/mistrals_pretrain/last.pt
+stop gpt2l epoch to:g
+pretrain gpt2l 0 unless:stop_gpt2l_g
+stop mambal epoch to:h
+pretrain mambal 1 unless:stop_mambal_h
+sweep mamba 0 mortality los_gt_7d readmit_30d
+pull_pretrain mistral
+sweep mistral 1 mortality los_gt_7d
+# 2026-10-07 23:10 MDT: mambal readmit_30d split off session h (whose chain does mortality + LOS) onto this card next to the mamba sweep; a renewed session resumes it with the same job list.
+sweep mambal 0 readmit_30d

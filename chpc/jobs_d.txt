@@ -1,0 +1,5 @@
+# CHPC job list for the FOURTH session (1 GPU, 128 GB): gpt2l alone, moved off the Sep-29 session.
+#   JOBS=chpc/jobs_d.txt SUPERVISE_LOG=logs/supervise_d.log MLFLOW_SUFFIX=_d nohup bash chpc/supervise.sh >> logs/supervise_d.log 2>&1 &
+memlimit 128
+pretrain gpt2l 0
+sweep mamba 0 mortality los_gt_7d readmit_30d

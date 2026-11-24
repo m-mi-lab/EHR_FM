@@ -1,0 +1,12 @@
+defaults: [_base]
+family: B2
+name: recency_ordered_visit
+regime: MAR
+description: >
+  Withhold visits ordered by recency. Conditions on the observed visit index.
+mechanism: {Z: visit_index, score: linear, beta: 4.0}
+orderings: [most_recent_first, oldest_first]
+eligible: visit_span
+vocab: {protect_structural: false}
+protocols: [event]
+twin: A2                     # matched-count RANDOM visit removal

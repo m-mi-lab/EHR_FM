@@ -1,0 +1,12 @@
+defaults: [_base]
+family: A2
+name: random_whole_visit
+regime: MCAR
+description: >
+  Withhold every token spanned by a randomly chosen visit, admission and
+  discharge markers included.
+mechanism: {Z: constant, score: zero, beta: 0.0}
+eligible: visit_span
+vocab: {protect_structural: false}   # this family deliberately targets scaffolding
+protocols: [event]
+twin: A1

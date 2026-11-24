@@ -1,0 +1,41 @@
+defaults: [_base]
+family: C1
+name: low_value_withholding
+regime: MNAR
+description: >
+  Value-conditioned withholding over ALL deciled lab tokens: withholding
+  probability decreases with the decile (mice::ampute type="LEFT").
+  This is a SENSITIVITY PROBE, not a clinical simulation. It tests whether the
+  model is sensitive to value-dependent withholding -- the MNAR question --
+  without claiming to imitate a mechanism.
+mechanism:
+  Z: token_decile
+  score: low_value        # s(d) = (5.5 - d)/4.5, so low deciles are targeted
+  beta: 4.0
+eligible: lab_tokens_with_decile
+protocols: [event]
+twin: A1
+
+replaces: limit_of_detection_censoring
+why_replaced: >
+  The LoD arm restricted withholding to bottom-decile tokens of four curated
+  assays (troponin 51003, D-dimer 50915/51196, lactate 50813). It had an honest
+  clinical mechanism but reached only 1.70 tokens per patient -- 0.53% of
+  content -- so withholding 97% of its eligible pool moved AUROC by 0.001 on
+  every task. No power to detect anything. Two further problems: BNP and
+  procalcitonin have zero matches in d_labitems, and the per-patient rounding
+  round(frac * 1.7) withheld nothing for most patients, so a requested 0.10
+  realized 0.015.
+  This version reaches 219.9 eligible tokens per patient (67.3% of content).
+
+caveat: >
+  Decile is NOT clinical normality -- _Q_1 sodium is 128 mEq/L, profoundly
+  abnormal and always reported, while _Q_1 glucose is hypoglycaemia, a critical
+  value that triggers MORE data, not less. Do not describe this arm as
+  censoring or as imitating clinician behaviour. It is a designed mechanism
+  used to probe value-dependence, and that is the only claim it supports.
+
+note: >
+  MEDS-Torch quantile bins are 1-indexed (_Q_1 .. _Q_10). The vocabulary
+  contains zero _Q_0 entries; an earlier version tested dec == 0 and so never
+  fired at all.

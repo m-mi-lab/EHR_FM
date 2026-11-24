@@ -1,0 +1,9 @@
+# CHPC job list for the 1-GPU session that replaces i (i expires Oct 14 ~20:08 MDT). Launch it AFTER i is gone: bertl is
+# converged, so this is only its finetune/leak/sweep chain (skips finished tasks, resumes a cut sweep from its checkpoint,
+# restarts a cut finetune from the pretrain checkpoint), plus the visit-family sweeps still owed by the large models.
+#   JOBS=chpc/jobs_l.txt SUPERVISE_LOG=logs/supervise_l.log MLFLOW_SUFFIX=_l nohup bash chpc/supervise.sh >> logs/supervise_l.log 2>&1 &
+memlimit 128
+# bertl sweep moved to jobs_j on Oct 16 (shares card 0 with gpt2l, as on i); do not run it here too.
+sweepx bigbird 0 A2,B2,B2o mortality los_gt_7d readmit_30d
+sweepx gpt2l 0 A2,B2,B2o mortality los_gt_7d readmit_30d
+sweep bigbird 0 readmit_30d

@@ -1,0 +1,12 @@
+# CHPC job list for a future EXTRA 2-GPU 128 GB session: takes gpt2l from the Oct-5 2-GPU session, launched only after the giving session stopped it right after an epoch save.
+#   JOBS=chpc/jobs_g.txt SUPERVISE_LOG=logs/supervise_g.log MLFLOW_SUFFIX=_g nohup bash chpc/supervise.sh >> logs/supervise_g.log 2>&1 &
+memlimit 128
+pretrain gpt2l 0 unless:stop_gpt2l_j
+stop gpt2l epoch to:j
+pretrain bigbird 1 unless:stop_bigbird_j
+stop bigbird epoch to:j
+# 2026-10-06 20:50 MDT: the second card was idle until bigbird arrives (~00:50 MDT); it takes the mistral readmission chain (finetune + leak + sweep) meanwhile and shares the card with bigbird afterwards.
+sweep mistral 1 readmit_30d
+# 2026-10-07: downstream chains start automatically once each pretrain is CONVERGED (sweep.sh sets the large-model micro-batches).
+sweep gpt2l 0 mortality los_gt_7d readmit_30d
+sweep bigbird 1 mortality los_gt_7d readmit_30d

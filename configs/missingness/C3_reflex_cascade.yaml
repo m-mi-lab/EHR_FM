@@ -1,0 +1,43 @@
+defaults: [_base]
+family: C2
+name: reflex_cascade
+regime: MNAR
+description: >
+  Reflex/cascade withholding. A downstream test exists only because an upstream
+  result warranted it; withhold the CHILD conditioned on the PARENT's value.
+  In MIMIC-IV microbiology the dependency is explicit and unambiguous:
+      MICRO//CULTURE//<specimen>   ordered   (100% of rows)
+      MICRO//ORGANISM//<organism>  grew      (41.1%)
+      MICRO//AB//<antibiotic>//<S|I|R>  sensitivity panel  (35.5%)
+  A sensitivity panel is only ever generated when a culture grew an organism, so
+  withholding the panel while keeping the organism is a mechanism the record
+  itself defines -- not one imposed by us.
+
+mechanism:
+  parent: MICRO//ORGANISM
+  child:  MICRO//AB
+  Z: parent_present
+  score: child_of_grown_culture
+  beta: 4.0
+eligible: micro_sensitivity_tokens
+protocols: [event]
+twin: A1
+
+why_this_is_the_right_reflex_pair: >
+  The earlier candidate was TSH -> free-T4, which has exactly one verified pair
+  in the vocabulary and no explicit link in the data -- the dependency would have
+  been asserted by us rather than observed. Culture -> sensitivity is recorded as
+  a parent/child relation in microbiologyevents itself, spans 367 organisms and
+  42 antibiotics, and covers 35.5% of microbiology rows.
+
+note: >
+  microbiologyevents was NOT part of the original ten-table MEDS extraction --
+  that was the stock MEDS_transforms MIMIC-IV subset, not a data limitation. The
+  table was present in the raw export the whole time. It was added on 2026-09-08
+  and the corpus re-extracted, which is why this family exists now and did not
+  before.
+
+caveat: >
+  charttime is null for 7.7% of microbiology rows; those events are dropped by the
+  extraction rather than back-filled from chartdate, so this family sees ~92% of
+  the microbiology record.

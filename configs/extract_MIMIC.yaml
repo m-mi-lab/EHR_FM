@@ -1,0 +1,48 @@
+defaults:
+  - _extract
+  - _self_
+
+description: |
+  This pipeline extracts the MIMIC-IV dataset in a longitudinal, sparse format and converts it to the flattened MEDS format.
+  You can configure key parameters by setting the following environment variables:
+  ```bash
+  export EVENT_CONVERSION_CONFIG_FP=<path_to_event_conversion_config>
+  export MIMICIV_PRE_MEDS_DIR=<path_to_pre_MEDS_output>
+  export MIMICIV_MEDS_EXTRACT_DIR=<path_to_final_dataset>
+  ```
+
+# Configuration for event conversion
+event_conversion_config_fp: ${oc.env:EVENT_CONVERSION_CONFIG_FP}
+
+# Input and cohort directories
+input_dir: ${oc.env:MIMICIV_PRE_MEDS_DIR}
+cohort_dir: ${oc.env:MIMICIV_MEDS_EXTRACT_DIR}
+
+etl_metadata:
+  dataset_name: MIMIC-IV
+  dataset_version: 2.2
+
+stage_configs:
+  shard_events:
+    # 10,000 was too few: icu/outputevents.value is integral for the first
+    # 10k rows, so polars typed it i64 and then failed on "112.5". Any numeric
+    # column whose decimals appear late has the same hazard.
+    infer_schema_length: 10000000
+    # Upstream default is 200,000,000. icu/chartevents has 432,997,491 rows, so
+    # it split into 3 chunks that ALL wrote to the same chartevents.parquet --
+    # only the last 32,997,491 survived and exactly 400,000,000 rows (2 full
+    # chunks) were silently lost. Every table must fit in one chunk.
+    row_chunksize: 500000000
+  split_and_shard_subjects:
+    n_subjects_per_shard: 5000
+    split_fracs:
+      train: 0.8
+      tuning: 0.1
+      held_out: 0.1
+
+stages:
+  - shard_events
+  - split_and_shard_subjects
+  - convert_to_sharded_events
+  - merge_to_MEDS_cohort
+  - finalize_MEDS_data
